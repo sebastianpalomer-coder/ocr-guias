@@ -3,6 +3,7 @@ import os
 import re
 import tempfile
 import unicodedata
+from datetime import datetime
 
 import cv2
 import numpy as np
@@ -35,7 +36,7 @@ def ping():
     return {
         "status": "ok",
         "service": "ocr-guias",
-        "version": "2.4-transex"
+        "version": "2.5-transex"
     }
 
 
@@ -47,7 +48,6 @@ async def ocr(file: UploadFile = File(...)):
         datos = await file.read()
 
         if not datos:
-
             raise HTTPException(
                 status_code=400,
                 detail="Archivo vacío"
@@ -191,13 +191,11 @@ def procesar_pdf(datos: bytes):
     finally:
 
         try:
-
             os.remove(
                 ruta_pdf
             )
 
         except Exception:
-
             pass
 
 
@@ -213,17 +211,9 @@ def procesar_imagen(
         imagen
     )
 
-    # --------------------------------------------------------
-    # CORREGIR PERSPECTIVA
-    # --------------------------------------------------------
-
     imagen_documento = corregir_perspectiva(
         imagen
     )
-
-    # --------------------------------------------------------
-    # PREPARAR IMAGEN
-    # --------------------------------------------------------
 
     imagen_preparada = preparar_imagen(
         imagen_documento
@@ -239,7 +229,7 @@ def procesar_imagen(
     )
 
     # --------------------------------------------------------
-    # OCR ZONA TABLA
+    # OCR TABLA
     # --------------------------------------------------------
 
     tabla = recortar_tabla_transex(
@@ -260,15 +250,25 @@ def procesar_imagen(
         )
 
     # --------------------------------------------------------
-    # DATOS GENERALES
+    # COMBINAMOS AMBAS LECTURAS
     # --------------------------------------------------------
 
-    documento = extraer_documento(
+    texto_combinado = (
         texto_completo
+        + "\n"
+        + tabla_texto
     )
 
     # --------------------------------------------------------
-    # DETALLE
+    # DOCUMENTO
+    # --------------------------------------------------------
+
+    documento = extraer_documento(
+        texto_combinado
+    )
+
+    # --------------------------------------------------------
+    # PRODUCTOS
     # --------------------------------------------------------
 
     detalle = interpretar_productos_transex(
@@ -285,7 +285,7 @@ def procesar_imagen(
 
 
 # ============================================================
-# PREPARACIÓN IMAGEN
+# PREPARAR IMAGEN
 # ============================================================
 
 def preparar_imagen(
@@ -370,7 +370,7 @@ def ejecutar_ocr_texto(
 
 
 # ============================================================
-# CORREGIR PERSPECTIVA
+# PERSPECTIVA
 # ============================================================
 
 def corregir_perspectiva(
@@ -464,7 +464,6 @@ def corregir_perspectiva(
         )
 
         if len(aproximado) != 4:
-
             continue
 
         area = cv2.contourArea(
@@ -475,7 +474,6 @@ def corregir_perspectiva(
             area
             < area_imagen * 0.45
         ):
-
             continue
 
         pagina = aproximado.reshape(
@@ -629,6 +627,11 @@ def extraer_documento(
                 texto
             ),
 
+        "folio_parcial_ocr":
+            extraer_folio_parcial(
+                texto
+            ),
+
         "fecha_emision_ocr":
             extraer_fecha_emision(
                 texto
@@ -666,28 +669,10 @@ def extraer_folio(
 
     texto_upper = texto.upper()
 
-    # --------------------------------------------------------
-    # SOLO BUSCAMOS NÚMERO CERCA DE N / N°
-    #
-    # No usamos cualquier número de seis dígitos
-    # porque podría ser subtotal, sello, etc.
-    # --------------------------------------------------------
-
-    patrones = [
-        r"N[°º]\s*(\d{6})",
-        r"\bN\s*[°º]?\s*(\d{6})\b"
-    ]
-
-    candidatos = []
-
-    for patron in patrones:
-
-        candidatos.extend(
-            re.findall(
-                patron,
-                texto_upper
-            )
-        )
+    candidatos = re.findall(
+        r"N\s*[°º]?\s*(\d{6})\b",
+        texto_upper
+    )
 
     if not candidatos:
 
@@ -710,18 +695,20 @@ def extraer_folio(
     )
 
 
-# ============================================================
-# FECHA EMISIÓN
-# ============================================================
-
-def extraer_fecha_emision(
+def extraer_folio_parcial(
     texto
 ):
 
+    # --------------------------------------------------------
+    # Para casos como:
+    #
+    # N 69971
+    #
+    # donde OCR perdió un dígito.
+    # --------------------------------------------------------
+
     resultado = re.search(
-        r"FECHA\s+EMISION"
-        r"\s*[:\-]?\s*"
-        r"(\d{2}/\d{2}/\d{4})",
+        r"\bN\s*[°º]?\s*(\d{5})\b",
         texto.upper()
     )
 
@@ -732,6 +719,124 @@ def extraer_fecha_emision(
         )
 
     return None
+
+
+# ============================================================
+# FECHA
+# ============================================================
+
+def extraer_fecha_emision(
+    texto
+):
+
+    # --------------------------------------------------------
+    # PRIMERO:
+    # FECHA EMISION xx/xx/xxxx
+    # --------------------------------------------------------
+
+    resultado = re.search(
+        r"FECHA\s+EMISION"
+        r"\s*[:\-]?\s*"
+        r"(\d{2}/\d{2}/\d{4})",
+        texto.upper()
+    )
+
+    if resultado:
+
+        fecha = validar_fecha(
+            resultado.group(1)
+        )
+
+        if fecha:
+
+            return fecha
+
+    # --------------------------------------------------------
+    # FALLBACK:
+    #
+    # buscamos todas las fechas válidas
+    # y usamos la más antigua.
+    #
+    # Normalmente:
+    #
+    # emisión = agosto
+    # vencimiento = septiembre
+    # --------------------------------------------------------
+
+    candidatos = re.findall(
+        r"\b\d{2}/\d{2}/\d{4}\b",
+        texto
+    )
+
+    fechas = []
+
+    for candidato in candidatos:
+
+        fecha = validar_fecha(
+            candidato
+        )
+
+        if fecha:
+
+            fechas.append(
+                fecha
+            )
+
+    if not fechas:
+
+        return None
+
+    fechas_objeto = []
+
+    for fecha in fechas:
+
+        try:
+
+            objeto = datetime.strptime(
+                fecha,
+                "%d/%m/%Y"
+            )
+
+            fechas_objeto.append(
+                (
+                    objeto,
+                    fecha
+                )
+            )
+
+        except Exception:
+
+            pass
+
+    if not fechas_objeto:
+
+        return None
+
+    fechas_objeto.sort(
+        key=lambda x: x[0]
+    )
+
+    return fechas_objeto[0][1]
+
+
+def validar_fecha(
+    texto
+):
+
+    try:
+
+        fecha = datetime.strptime(
+            texto,
+            "%d/%m/%Y"
+        )
+
+        return fecha.strftime(
+            "%d/%m/%Y"
+        )
+
+    except Exception:
+
+        return None
 
 
 # ============================================================
@@ -748,22 +853,13 @@ def extraer_rut_emisor(
     # TRANSEX
     # --------------------------------------------------------
 
-    patron_transex = re.search(
-        r"88"
-        r"[\.\s]*147"
-        r"[\.\s]*"
-        r"[56][0O][0O]"
-        r"[\-\s]*2",
+    if re.search(
+        r"88[\.\s]*147[\.\s]*"
+        r"[56][0O][0O][\-\s]*2",
         texto_upper
-    )
-
-    if patron_transex:
+    ):
 
         return "88147600-2"
-
-    # --------------------------------------------------------
-    # GENÉRICO
-    # --------------------------------------------------------
 
     candidatos = re.findall(
         r"\b\d{1,2}"
@@ -819,37 +915,27 @@ def extraer_total_documento(
 
     for linea in texto.splitlines():
 
-        linea_upper = (
-            linea.upper()
-        )
+        linea_upper = linea.upper()
 
         if "SUBTOTAL" in linea_upper:
-
             continue
 
         if not re.search(
             r"\bTOTAL\b",
             linea_upper
         ):
-
             continue
 
-        montos = re.findall(
-            r"\b\d{1,3}"
-            r"(?:[.,]\d{3})+\b",
+        montos = extraer_montos(
             linea
         )
 
         for monto in montos:
 
-            valor = convertir_monto(
-                monto
-            )
-
-            if valor is not None:
+            if monto >= 1000:
 
                 candidatos.append(
-                    valor
+                    monto
                 )
 
     if candidatos:
@@ -870,10 +956,6 @@ def extraer_obra(
 ):
 
     texto_upper = texto.upper()
-
-    # --------------------------------------------------------
-    # ACTUAL MVP
-    # --------------------------------------------------------
 
     if "HOTEL BELLET" in texto_upper:
 
@@ -919,6 +1001,10 @@ def extraer_patente(
 
     texto_upper = texto.upper()
 
+    # --------------------------------------------------------
+    # CERCA DE PALABRA PATENTE
+    # --------------------------------------------------------
+
     resultado = re.search(
         r"PATENTE"
         r"[\s:>\-|]*"
@@ -934,6 +1020,35 @@ def extraer_patente(
             resultado.group(1)
         )
 
+    # --------------------------------------------------------
+    # FALLBACK GENERAL
+    #
+    # PKYS-62
+    # XE-9423
+    # BKK-52
+    # --------------------------------------------------------
+
+    candidatos = re.findall(
+        r"\b("
+        r"[A-Z]{2,4}"
+        r"-"
+        r"\d{2,4}"
+        r")\b",
+        texto_upper
+    )
+
+    for candidato in candidatos:
+
+        # Evitar código hormigón
+        if candidato.startswith(
+            "GR"
+        ):
+            continue
+
+        return normalizar_patente(
+            candidato
+        )
+
     return None
 
 
@@ -945,19 +1060,12 @@ def normalizar_patente(
         patente or ""
     ).upper().strip()
 
-    patente = re.sub(
-        r"\s+",
-        "",
-        patente
+    patente = patente.replace(
+        " ",
+        ""
     )
 
-    # --------------------------------------------------------
-    # NUEVO FORMATO:
-    #
-    # DLBT70 -> DLBT-70
-    # PKYS62 -> PKYS-62
-    # --------------------------------------------------------
-
+    # DLBT70
     resultado = re.fullmatch(
         r"([A-Z]{4})(\d{2})",
         patente
@@ -971,12 +1079,7 @@ def normalizar_patente(
             + resultado.group(2)
         )
 
-    # --------------------------------------------------------
-    # FORMATO ANTIGUO:
-    #
-    # XE9423 -> XE-9423
-    # --------------------------------------------------------
-
+    # XE9423
     resultado = re.fullmatch(
         r"([A-Z]{2})(\d{4})",
         patente
@@ -990,40 +1093,16 @@ def normalizar_patente(
             + resultado.group(2)
         )
 
-    patente = re.sub(
-        r"-+",
-        "-",
-        patente
-    )
-
     return patente
 
 
 # ============================================================
-# REGLA MATEMÁTICA DE CANTIDAD
+# REGLA CANTIDAD
 # ============================================================
 
 def normalizar_medio_m3(
     cantidad
 ):
-
-    """
-    REGLA DE NEGOCIO:
-
-    La cantidad siempre debe ser:
-
-    0,50
-    1,00
-    1,50
-    2,00
-    2,50
-    etc.
-
-    Nunca:
-    3,20
-    6,80
-    7,25
-    """
 
     if cantidad is None:
 
@@ -1056,30 +1135,22 @@ def cantidad_es_multiplo_medio(
 
         return False
 
-    try:
+    normalizada = normalizar_medio_m3(
+        cantidad
+    )
 
-        cantidad = float(
-            cantidad
-        )
-
-    except Exception:
+    if normalizada is None:
 
         return False
 
-    cantidad_normalizada = (
-        normalizar_medio_m3(
-            cantidad
-        )
-    )
-
     return abs(
-        cantidad
-        - cantidad_normalizada
-    ) < 0.01
+        float(cantidad)
+        - normalizada
+    ) < 0.001
 
 
 # ============================================================
-# PRODUCTOS TRANSEX
+# PARSER PRODUCTOS
 # ============================================================
 
 def interpretar_productos_transex(
@@ -1142,7 +1213,120 @@ def interpretar_productos_transex(
 
 
 # ============================================================
-# BUSCAR LÍNEAS PRODUCTO
+# GENERAR BLOQUES ALREDEDOR DE PRODUCTO
+# ============================================================
+
+def generar_bloques(
+    texto
+):
+
+    lineas = [
+        re.sub(
+            r"\s+",
+            " ",
+            linea
+        ).strip()
+        for linea in texto.splitlines()
+    ]
+
+    bloques = []
+
+    for indice, linea in enumerate(
+        lineas
+    ):
+
+        if not linea:
+            continue
+
+        linea_upper = linea.upper()
+
+        # ----------------------------------------------------
+        # HORMIGÓN
+        # ----------------------------------------------------
+
+        if re.search(
+            r"\b4489\b",
+            linea_upper
+        ):
+
+            partes = [
+                linea
+            ]
+
+            # Agregamos hasta dos líneas siguientes.
+            for offset in [1, 2]:
+
+                posicion = (
+                    indice + offset
+                )
+
+                if posicion < len(lineas):
+
+                    siguiente = lineas[
+                        posicion
+                    ]
+
+                    if siguiente:
+
+                        partes.append(
+                            siguiente
+                        )
+
+            bloques.append({
+                "tipo": "HORMIGON",
+                "texto": " ".join(
+                    partes
+                )
+            })
+
+        # ----------------------------------------------------
+        # CARGA INCOMPLETA
+        # ----------------------------------------------------
+
+        if (
+            "CARGA"
+            in linea_upper
+            and
+            (
+                "INCOMP"
+                in linea_upper
+                or
+                "INCO"
+                in linea_upper
+            )
+        ):
+
+            partes = [
+                linea
+            ]
+
+            if (
+                indice + 1
+                < len(lineas)
+            ):
+
+                siguiente = lineas[
+                    indice + 1
+                ]
+
+                if siguiente:
+
+                    partes.append(
+                        siguiente
+                    )
+
+            bloques.append({
+                "tipo": "CARGA",
+                "texto": " ".join(
+                    partes
+                )
+            })
+
+    return bloques
+
+
+# ============================================================
+# BUSCAR PRODUCTOS
 # ============================================================
 
 def buscar_productos_en_texto(
@@ -1156,129 +1340,82 @@ def buscar_productos_en_texto(
 
         return resultados
 
-    lineas = texto.splitlines()
+    bloques = generar_bloques(
+        texto
+    )
 
-    for linea in lineas:
+    for bloque in bloques:
 
-        linea = re.sub(
-            r"\s+",
-            " ",
-            linea
-        ).strip()
+        if bloque["tipo"] == "HORMIGON":
 
-        if not linea:
-
-            continue
-
-        linea_upper = linea.upper()
-
-        # ----------------------------------------------------
-        # HORMIGÓN CÓDIGO 4489
-        # ----------------------------------------------------
-
-        if re.search(
-            r"\b4489\b",
-            linea_upper
-        ):
-
-            item = interpretar_linea_hormigon(
-                linea,
+            item = interpretar_bloque_hormigon(
+                bloque["texto"],
                 fuente
             )
 
-            if item:
+        else:
 
-                resultados.append(
-                    item
-                )
-
-            continue
-
-        # ----------------------------------------------------
-        # CARGA INCOMPLETA
-        # ----------------------------------------------------
-
-        if (
-            "CARGA"
-            in linea_upper
-            and
-            (
-                "INCOMPLETA"
-                in linea_upper
-                or
-                "INCO"
-                in linea_upper
-            )
-        ):
-
-            item = interpretar_linea_carga(
-                linea,
+            item = interpretar_bloque_carga(
+                bloque["texto"],
                 fuente
             )
 
-            if item:
+        if item:
 
-                resultados.append(
-                    item
-                )
+            resultados.append(
+                item
+            )
 
     return resultados
 
 
 # ============================================================
-# INTERPRETAR HORMIGÓN
+# HORMIGÓN
 # ============================================================
 
-def interpretar_linea_hormigon(
-    linea,
+def interpretar_bloque_hormigon(
+    texto,
     fuente
 ):
 
-    linea_upper = linea.upper()
+    texto_upper = texto.upper()
 
     if not re.search(
         r"\b4489\b",
-        linea_upper
+        texto_upper
     ):
 
         return None
 
     descripcion = extraer_descripcion_hormigon(
-        linea_upper
+        texto_upper
     )
 
     # --------------------------------------------------------
-    # TRABAJAR CON LA PARTE POSTERIOR A C/XX
+    # EVITAR NÚMEROS DEL CÓDIGO DEL HORMIGÓN
     #
-    # Evita confundir:
-    #
-    # GR20
-    # 90
-    # 40
-    # 08
-    #
-    # con cantidades o precios.
+    # Tomamos texto después de C/08 si existe.
     # --------------------------------------------------------
 
-    resultado_fin = re.search(
+    resultado = re.search(
         r"C/\d{1,3}",
-        linea_upper
+        texto_upper
     )
 
-    if resultado_fin:
+    if resultado:
 
-        cola = linea[
-            resultado_fin.end():
+        cola = texto[
+            resultado.end():
         ]
 
     else:
 
         resultado_codigo = re.search(
             r"\b4489\b",
-            linea_upper
+            texto_upper
         )
 
-        cola = linea[
+        cola = texto[
             resultado_codigo.end():
         ]
 
@@ -1287,88 +1424,108 @@ def interpretar_linea_hormigon(
     )
 
     return {
-        "codigo": "4489",
-        "descripcion": descripcion,
-        "unidad": "M3",
-        "fuente": fuente,
+        "codigo":
+            "4489",
+
+        "descripcion":
+            descripcion,
+
+        "unidad":
+            "M3",
+
         "cantidad_ocr":
-            componentes["cantidad_ocr"],
-        "precio_candidatos":
-            componentes["montos"][:1],
-        "total_candidatos":
-            componentes["montos"][1:],
-        "montos_candidatos":
-            componentes["montos"],
-        "fila_raw": linea
+            componentes[
+                "cantidad_ocr"
+            ],
+
+        "montos":
+            componentes[
+                "montos"
+            ],
+
+        "fuente":
+            fuente,
+
+        "fila_raw":
+            texto
     }
 
 
 # ============================================================
-# CARGA INCOMPLETA
+# CARGA
 # ============================================================
 
-def interpretar_linea_carga(
-    linea,
+def interpretar_bloque_carga(
+    texto,
     fuente
 ):
 
-    linea_upper = linea.upper()
+    texto_upper = texto.upper()
 
     resultado = re.search(
         r"CARGA\s+INCO[A-Z]*",
-        linea_upper
+        texto_upper
     )
 
     if resultado:
 
-        cola = linea[
+        cola = texto[
             resultado.end():
         ]
 
     else:
 
-        cola = linea
+        cola = texto
 
     componentes = extraer_componentes_producto(
         cola
     )
 
     return {
-        "codigo": "CAR-INCOMP",
-        "descripcion": "CARGA INCOMPLETA",
-        "unidad": "M3",
-        "fuente": fuente,
+        "codigo":
+            "CAR-INCOMP",
+
+        "descripcion":
+            "CARGA INCOMPLETA",
+
+        "unidad":
+            "M3",
+
         "cantidad_ocr":
-            componentes["cantidad_ocr"],
-        "precio_candidatos":
-            componentes["montos"][:1],
-        "total_candidatos":
-            componentes["montos"][1:],
-        "montos_candidatos":
-            componentes["montos"],
-        "fila_raw": linea
+            componentes[
+                "cantidad_ocr"
+            ],
+
+        "montos":
+            componentes[
+                "montos"
+            ],
+
+        "fuente":
+            fuente,
+
+        "fila_raw":
+            texto
     }
 
 
 # ============================================================
-# COMPONENTES NUMÉRICOS DE UNA LÍNEA
+# EXTRAER CANTIDAD Y MONTOS
 # ============================================================
 
 def extraer_componentes_producto(
     texto
 ):
 
-    cantidades = []
-
     # --------------------------------------------------------
-    # CANTIDADES PERFECTAMENTE VÁLIDAS
+    # CANTIDAD
     #
-    # Solo:
+    # SOLO:
     #
-    # X,00
-    # X,50
-    # X.00
-    # X.50
+    # x,00
+    # x,50
+    # x.00
+    # x.50
     # --------------------------------------------------------
 
     cantidades_raw = re.findall(
@@ -1378,10 +1535,12 @@ def extraer_componentes_producto(
         texto
     )
 
-    for cantidad_raw in cantidades_raw:
+    cantidades = []
+
+    for raw in cantidades_raw:
 
         cantidad = convertir_decimal(
-            cantidad_raw
+            raw
         )
 
         if (
@@ -1398,36 +1557,6 @@ def extraer_componentes_producto(
                 cantidad
             )
 
-    # --------------------------------------------------------
-    # CASO:
-    #
-    # M3 8
-    #
-    # Por si OCR perdió ",00".
-    # --------------------------------------------------------
-
-    resultado_entero = re.search(
-        r"M3"
-        r"[\s|:\-]*"
-        r"(\d{1,2})\b",
-        texto.upper()
-    )
-
-    if resultado_entero:
-
-        cantidad = float(
-            resultado_entero.group(1)
-        )
-
-        if (
-            0 < cantidad <= 100
-        ):
-
-            cantidades.append(
-                cantidad
-            )
-
-    # Quitar repetidos.
     cantidades = lista_unica(
         cantidades
     )
@@ -1435,64 +1564,99 @@ def extraer_componentes_producto(
     # --------------------------------------------------------
     # MONTOS
     #
-    # Reconoce:
+    # IMPORTANTE:
     #
-    # 83.778
-    # 586.404
-    # 251 334
-    # 83778
-    # 670224
+    # 83.772 586.404
+    #
+    # DEBE DAR:
+    #
+    # 83772
+    # 586404
+    #
+    # y NO:
+    #
+    # 83772586404
     # --------------------------------------------------------
 
-    montos_raw = re.findall(
-        r"(?<!\d)"
-        r"("
-        r"\d{1,3}(?:[.\s]\d{3})+"
-        r"|"
-        r"\d{4,7}"
-        r")"
-        r"(?!\d)",
+    montos = extraer_montos(
         texto
-    )
-
-    montos = []
-
-    for monto_raw in montos_raw:
-
-        monto = convertir_monto(
-            monto_raw
-        )
-
-        if (
-            monto is not None
-            and
-            monto >= 1000
-        ):
-
-            montos.append(
-                monto
-            )
-
-    montos = lista_unica(
-        montos
-    )
-
-    cantidad_ocr = (
-        cantidades[0]
-        if cantidades
-        else None
     )
 
     return {
         "cantidad_ocr":
-            cantidad_ocr,
-
-        "cantidades_ocr":
-            cantidades,
+            (
+                cantidades[0]
+                if cantidades
+                else None
+            ),
 
         "montos":
             montos
     }
+
+
+# ============================================================
+# EXTRAER MONTOS CORRECTAMENTE
+# ============================================================
+
+def extraer_montos(
+    texto
+):
+
+    """
+    Reconoce por separado:
+
+    83.772
+    586.404
+    83,772
+    251 334
+    83778
+    670224
+
+    Nunca une:
+
+    83.772 586.404
+    """
+
+    patron = re.compile(
+        r"(?<![\d.,])"
+        r"("
+        r"\d{1,3}(?:\.\d{3})+"
+        r"|"
+        r"\d{1,3}(?:,\d{3})+"
+        r"|"
+        r"\d{1,3}\s+\d{3}"
+        r"|"
+        r"\d{4,7}"
+        r")"
+        r"(?![\d.,])"
+    )
+
+    resultados = []
+
+    for coincidencia in patron.finditer(
+        texto
+    ):
+
+        raw = coincidencia.group(
+            1
+        )
+
+        valor = convertir_monto(
+            raw
+        )
+
+        if (
+            valor is not None
+            and
+            1000 <= valor <= 9999999
+        ):
+
+            resultados.append(
+                valor
+            )
+
+    return resultados
 
 
 # ============================================================
@@ -1504,19 +1668,9 @@ def resolver_producto(
     opciones
 ):
 
-    if not opciones:
-
-        return None
-
-    # --------------------------------------------------------
-    # CANTIDADES LEÍDAS POR OCR
-    # --------------------------------------------------------
-
     cantidades_ocr = []
 
-    precios = []
-
-    totales = []
+    todos_montos = []
 
     fuentes = []
 
@@ -1525,24 +1679,6 @@ def resolver_producto(
     descripciones = []
 
     for opcion in opciones:
-
-        fuentes.append(
-            opcion.get(
-                "fuente"
-            )
-        )
-
-        filas.append(
-            opcion.get(
-                "fila_raw"
-            )
-        )
-
-        descripciones.append(
-            opcion.get(
-                "descripcion"
-            )
-        )
 
         cantidad = opcion.get(
             "cantidad_ocr"
@@ -1554,81 +1690,89 @@ def resolver_producto(
                 cantidad
             )
 
-        for precio in opcion.get(
-            "precio_candidatos",
-            []
-        ):
+        todos_montos.extend(
+            opcion.get(
+                "montos",
+                []
+            )
+        )
 
-            if (
-                precio is not None
-                and
-                precio >= 1000
-            ):
+        fuente = opcion.get(
+            "fuente"
+        )
 
-                precios.append(
-                    precio
-                )
+        if fuente:
 
-        for total in opcion.get(
-            "total_candidatos",
-            []
-        ):
+            fuentes.append(
+                fuente
+            )
 
-            if (
-                total is not None
-                and
-                total >= 1000
-            ):
+        fila = opcion.get(
+            "fila_raw"
+        )
 
-                totales.append(
-                    total
-                )
+        if fila:
+
+            filas.append(
+                fila
+            )
+
+        descripcion = opcion.get(
+            "descripcion"
+        )
+
+        if descripcion:
+
+            descripciones.append(
+                descripcion
+            )
 
     cantidades_ocr = lista_unica(
         cantidades_ocr
     )
 
-    precios = lista_unica(
-        precios
-    )
+    # --------------------------------------------------------
+    # Conservamos repetición para saber qué monto
+    # apareció más veces.
+    # --------------------------------------------------------
 
-    totales = lista_unica(
-        totales
+    montos_unicos = lista_unica(
+        todos_montos
     )
 
     # --------------------------------------------------------
-    # BUSCAR COMBINACIÓN MATEMÁTICA EXACTA
+    # BUSCAR SOLUCIÓN EXACTA:
     #
-    # cantidad = total / precio
+    # TOTAL / PRECIO =
     #
-    # y cantidad debe ser múltiplo de 0,50.
+    # 0,50
+    # 1,00
+    # 1,50
+    # ...
     # --------------------------------------------------------
 
-    solucion_matematica = buscar_solucion_matematica(
-        precios,
-        totales,
+    solucion = buscar_solucion_matematica(
+        montos_unicos,
         cantidades_ocr
     )
 
-    if solucion_matematica:
+    if solucion:
 
-        cantidad = solucion_matematica[
+        cantidad = solucion[
             "cantidad"
         ]
 
-        precio = solucion_matematica[
+        precio = solucion[
             "precio"
         ]
 
-        total_ocr = solucion_matematica[
+        total_ocr = solucion[
             "total"
         ]
 
-        cantidad_calculada = (
-            solucion_matematica[
-                "cantidad_calculada"
-            ]
-        )
+        cantidad_calculada = solucion[
+            "cantidad_calculada"
+        ]
 
         cantidad_validada = True
 
@@ -1636,30 +1780,23 @@ def resolver_producto(
             "CALCULADA_PRECIO_TOTAL"
         )
 
-        # ----------------------------------------------------
-        # ¿Tuvimos que corregir el OCR?
-        # ----------------------------------------------------
-
-        coincidencia_ocr = any(
+        coincide_con_ocr = any(
             abs(
-                cantidad_ocr
-                - cantidad
-            ) < 0.01
-            for cantidad_ocr
-            in cantidades_ocr
+                valor - cantidad
+            ) < 0.001
+            for valor in cantidades_ocr
         )
 
         cantidad_forzada = (
-            not coincidencia_ocr
+            not coincide_con_ocr
         )
 
     else:
 
         # ----------------------------------------------------
-        # NO TENEMOS PRECIO + TOTAL VALIDABLE.
+        # FALLBACK:
         #
-        # Usamos cantidad OCR solo si cumple
-        # múltiplo de 0,50.
+        # cantidad OCR válida + precio más probable
         # ----------------------------------------------------
 
         cantidad = (
@@ -1669,14 +1806,10 @@ def resolver_producto(
         )
 
         precio = seleccionar_precio(
-            precios
+            todos_montos
         )
 
-        total_ocr = (
-            totales[0]
-            if totales
-            else None
-        )
+        total_ocr = None
 
         cantidad_calculada = None
 
@@ -1707,10 +1840,6 @@ def resolver_producto(
             * precio
         )
 
-    # --------------------------------------------------------
-    # TOTAL COINCIDE
-    # --------------------------------------------------------
-
     total_coincide = None
 
     if (
@@ -1721,27 +1850,18 @@ def resolver_producto(
 
         total_coincide = (
             abs(
-                total_ocr
-                - total_calculado
+                total_calculado
+                - total_ocr
             )
             <= 1
         )
-
-    # --------------------------------------------------------
-    # DESCRIPCIÓN
-    # --------------------------------------------------------
 
     descripcion = seleccionar_descripcion(
         codigo,
         descripciones
     )
 
-    # --------------------------------------------------------
-    # RESULTADO
-    # --------------------------------------------------------
-
-    resultado = {
-
+    return {
         "codigo":
             codigo,
 
@@ -1799,83 +1919,75 @@ def resolver_producto(
             "+".join(
                 sorted(
                     set(
-                        fuente
-                        for fuente
-                        in fuentes
-                        if fuente
+                        fuentes
                     )
                 )
             ),
 
+        "montos_detectados":
+            montos_unicos,
+
         "fila_raw":
             " || ".join(
-                fila
-                for fila
-                in filas
-                if fila
+                filas
             )
     }
 
-    return resultado
-
 
 # ============================================================
-# MATEMÁTICA PRECIO / TOTAL / CANTIDAD
+# BUSCAR SOLUCIÓN MATEMÁTICA
 # ============================================================
 
 def buscar_solucion_matematica(
-    precios,
-    totales,
+    montos,
     cantidades_ocr
 ):
 
     soluciones = []
 
-    for precio in precios:
+    # --------------------------------------------------------
+    # PROBAMOS TODAS LAS COMBINACIONES.
+    #
+    # No suponemos que el primer número
+    # necesariamente sea el precio.
+    # --------------------------------------------------------
 
-        if (
-            precio is None
-            or
-            precio <= 0
+    for precio in montos:
+
+        # Precio unitario razonable.
+        if not (
+            10000
+            <= precio
+            <= 500000
         ):
 
             continue
 
-        for total in totales:
+        for total in montos:
 
-            if (
-                total is None
-                or
-                total <= 0
-            ):
+            if total <= precio:
 
                 continue
 
-            # ------------------------------------------------
-            # Cantidad matemática exacta aproximada
-            # ------------------------------------------------
-
-            cantidad_calculada = (
+            cantidad_exacta = (
                 total
                 / precio
             )
 
-            # ------------------------------------------------
-            # FORZAR A PASO DE 0,50
-            # ------------------------------------------------
-
             cantidad_normalizada = (
                 normalizar_medio_m3(
-                    cantidad_calculada
+                    cantidad_exacta
                 )
             )
 
-            if (
-                cantidad_normalizada is None
-                or
-                cantidad_normalizada <= 0
-                or
-                cantidad_normalizada > 100
+            if cantidad_normalizada is None:
+
+                continue
+
+            if not (
+                0.5
+                <= cantidad_normalizada
+                <= 100
             ):
 
                 continue
@@ -1891,59 +2003,56 @@ def buscar_solucion_matematica(
             )
 
             # ------------------------------------------------
-            # EXIGIMOS COINCIDENCIA MATEMÁTICA
-            #
-            # Permitimos diferencia máxima de $1
-            # solo por redondeos.
+            # Debe cuadrar matemáticamente.
             # ------------------------------------------------
 
             if diferencia > 1:
 
                 continue
 
-            # ------------------------------------------------
-            # PUNTAJE
-            # ------------------------------------------------
-
             puntaje = 1000
 
-            # Si además OCR leyó la misma cantidad,
-            # aumenta mucho la confianza.
+            # ------------------------------------------------
+            # Si OCR también leyó la misma cantidad,
+            # esta combinación gana prioridad.
+            # ------------------------------------------------
+
             for cantidad_ocr in cantidades_ocr:
 
                 if abs(
                     cantidad_ocr
                     - cantidad_normalizada
-                ) < 0.01:
+                ) < 0.001:
 
-                    puntaje += 100
+                    puntaje += 500
 
-            # Preferimos precios razonables
-            # para hormigón.
+            # ------------------------------------------------
+            # Precios más probables de hormigón.
+            # ------------------------------------------------
+
             if (
-                20000
+                30000
                 <= precio
-                <= 300000
+                <= 200000
             ):
 
-                puntaje += 20
+                puntaje += 50
 
             soluciones.append({
+                "cantidad":
+                    cantidad_normalizada,
+
+                "cantidad_calculada":
+                    round(
+                        cantidad_exacta,
+                        6
+                    ),
 
                 "precio":
                     precio,
 
                 "total":
                     total,
-
-                "cantidad":
-                    cantidad_normalizada,
-
-                "cantidad_calculada":
-                    round(
-                        cantidad_calculada,
-                        6
-                    ),
 
                 "diferencia":
                     diferencia,
@@ -1968,53 +2077,53 @@ def buscar_solucion_matematica(
 
 
 # ============================================================
-# SELECCIONAR PRECIO
+# PRECIO FALLBACK
 # ============================================================
 
 def seleccionar_precio(
-    precios
+    montos
 ):
 
-    if not precios:
+    if not montos:
+
+        return None
+
+    candidatos = [
+        monto
+        for monto in montos
+        if (
+            10000
+            <= monto
+            <= 200000
+        )
+    ]
+
+    if not candidatos:
 
         return None
 
     # --------------------------------------------------------
-    # Eliminar valores absurdamente bajos
+    # Elegir el que apareció más veces
+    # entre TEXTO_OCR + TABLA_OCR.
     # --------------------------------------------------------
 
-    razonables = [
-        precio
-        for precio in precios
-        if (
-            10000
-            <= precio
-            <= 500000
-        )
-    ]
-
-    if razonables:
-
-        return razonables[0]
-
-    return precios[0]
+    return max(
+        set(candidatos),
+        key=candidatos.count
+    )
 
 
 # ============================================================
-# DESCRIPCIÓN HORMIGÓN
+# DESCRIPCIÓN
 # ============================================================
 
 def extraer_descripcion_hormigon(
-    linea
+    texto
 ):
-
-    # --------------------------------------------------------
-    # CASO PERFECTO
-    # --------------------------------------------------------
 
     resultado = re.search(
         r"(HORMIGON\s+.*?C/\d{1,3})",
-        linea
+        texto
     )
 
     if resultado:
@@ -2023,15 +2132,9 @@ def extraer_descripcion_hormigon(
             resultado.group(1)
         )
 
-    # --------------------------------------------------------
-    # OCR DAÑÓ "HORMIGON"
-    #
-    # Intentamos conservar GR...C/XX
-    # --------------------------------------------------------
-
     resultado = re.search(
         r"(GR\d{1,3}.*?C/\d{1,3})",
-        linea
+        texto
     )
 
     if resultado:
@@ -2041,11 +2144,6 @@ def extraer_descripcion_hormigon(
             + resultado.group(1)
         )
 
-    # --------------------------------------------------------
-    # EN FASE 3 SERÁ REEMPLAZADO / VALIDADO
-    # CONTRA ITEM_TED.
-    # --------------------------------------------------------
-
     return "HORMIGON"
 
 
@@ -2054,32 +2152,16 @@ def seleccionar_descripcion(
     descripciones
 ):
 
-    descripciones = [
-        descripcion
-        for descripcion in descripciones
-        if descripcion
-    ]
-
     if codigo == "CAR-INCOMP":
 
         return "CARGA INCOMPLETA"
-
-    if not descripciones:
-
-        return "HORMIGON"
-
-    # --------------------------------------------------------
-    # Preferir descripción que tenga:
-    #
-    # HORMIGON
-    # +
-    # C/
-    # --------------------------------------------------------
 
     completas = [
         descripcion
         for descripcion in descripciones
         if (
+            descripcion
+            and
             "HORMIGON"
             in descripcion.upper()
             and
@@ -2095,14 +2177,11 @@ def seleccionar_descripcion(
             key=len
         )
 
-    return max(
-        descripciones,
-        key=len
-    )
+    return "HORMIGON"
 
 
 # ============================================================
-# RECORTAR TABLA
+# RECORTE TABLA
 # ============================================================
 
 def recortar_tabla_transex(
@@ -2147,9 +2226,7 @@ def convertir_decimal(
 
     valor = str(
         texto
-    ).strip()
-
-    valor = valor.replace(
+    ).replace(
         ",",
         "."
     )
@@ -2219,15 +2296,13 @@ def limpiar_texto(
     texto
 ):
 
-    texto = re.sub(
+    return re.sub(
         r"\s+",
         " ",
         str(
             texto or ""
         )
-    )
-
-    return texto.strip()
+    ).strip()
 
 
 def normalizar_texto(
