@@ -4,3 +4,5 @@ python-multipart
 pillow
 pytesseract
 pypdfium2
+opencv-python-headless
+numpy
