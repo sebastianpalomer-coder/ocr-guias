@@ -2,9 +2,7 @@ import io
 import os
 import re
 import tempfile
-import statistics
 import unicodedata
-from difflib import SequenceMatcher
 
 import cv2
 import numpy as np
@@ -38,7 +36,7 @@ def ping():
     return {
         "status": "ok",
         "service": "ocr-guias",
-        "version": "2.1-transex"
+        "version": "2.2-transex"
     }
 
 
@@ -50,6 +48,7 @@ async def ocr(file: UploadFile = File(...)):
         datos = await file.read()
 
         if not datos:
+
             raise HTTPException(
                 status_code=400,
                 detail="Archivo vacío"
@@ -75,7 +74,9 @@ async def ocr(file: UploadFile = File(...)):
                 io.BytesIO(datos)
             )
 
-            imagen = ImageOps.exif_transpose(imagen)
+            imagen = ImageOps.exif_transpose(
+                imagen
+            )
 
             resultado = procesar_imagen(
                 imagen
@@ -100,7 +101,9 @@ async def ocr(file: UploadFile = File(...)):
 
 
     except HTTPException:
+
         raise
+
 
     except Exception as error:
 
@@ -127,6 +130,7 @@ def procesar_pdf(datos: bytes):
     ) as tmp:
 
         tmp.write(datos)
+
         ruta_pdf = tmp.name
 
     try:
@@ -137,9 +141,13 @@ def procesar_pdf(datos: bytes):
 
         total_paginas = len(pdf)
 
-        for numero_pagina in range(total_paginas):
+        for numero_pagina in range(
+            total_paginas
+        ):
 
-            pagina = pdf[numero_pagina]
+            pagina = pdf[
+                numero_pagina
+            ]
 
             bitmap = pagina.render(
                 scale=3
@@ -147,23 +155,31 @@ def procesar_pdf(datos: bytes):
 
             imagen = bitmap.to_pil()
 
-            resultado_pagina = procesar_imagen(
-                imagen
+            resultado_pagina = (
+                procesar_imagen(
+                    imagen
+                )
             )
 
             textos.append(
                 "--- PAGINA {} ---\n{}".format(
                     numero_pagina + 1,
-                    resultado_pagina["text"]
+                    resultado_pagina[
+                        "text"
+                    ]
                 )
             )
 
             documentos.append(
-                resultado_pagina["documento"]
+                resultado_pagina[
+                    "documento"
+                ]
             )
 
             detalles.extend(
-                resultado_pagina["detalle"]
+                resultado_pagina[
+                    "detalle"
+                ]
             )
 
             tablas.append(
@@ -180,18 +196,38 @@ def procesar_pdf(datos: bytes):
         )
 
         return {
-            "pages": total_paginas,
-            "text": "\n\n".join(textos),
-            "documento": documento,
-            "detalle": detalles,
-            "tabla_texto": "\n\n".join(tablas)
+
+            "pages":
+                total_paginas,
+
+            "text":
+                "\n\n".join(
+                    textos
+                ),
+
+            "documento":
+                documento,
+
+            "detalle":
+                detalles,
+
+            "tabla_texto":
+                "\n\n".join(
+                    tablas
+                )
         }
+
 
     finally:
 
         try:
-            os.remove(ruta_pdf)
+
+            os.remove(
+                ruta_pdf
+            )
+
         except Exception:
+
             pass
 
 
@@ -199,102 +235,138 @@ def procesar_pdf(datos: bytes):
 # PROCESAR IMAGEN
 # ============================================================
 
-def procesar_imagen(imagen: Image.Image):
+def procesar_imagen(
+    imagen: Image.Image
+):
 
     # --------------------------------------------------------
-    # 1. Corregir orientación / perspectiva
+    # Orientación
     # --------------------------------------------------------
 
     imagen = ImageOps.exif_transpose(
         imagen
     )
 
-    imagen_documento = corregir_perspectiva(
-        imagen
+    # --------------------------------------------------------
+    # Corrección perspectiva
+    # --------------------------------------------------------
+
+    imagen_documento = (
+        corregir_perspectiva(
+            imagen
+        )
     )
 
     # --------------------------------------------------------
-    # 2. Preparar imagen
+    # Preparar para OCR
     # --------------------------------------------------------
 
-    imagen_preparada = preparar_imagen(
-        imagen_documento
+    imagen_preparada = (
+        preparar_imagen(
+            imagen_documento
+        )
     )
 
     # --------------------------------------------------------
-    # 3. OCR completo
+    # OCR página completa
     # --------------------------------------------------------
 
-    texto_completo = ejecutar_ocr_texto(
-        imagen_preparada
+    texto_completo = (
+        ejecutar_ocr_texto(
+            imagen_preparada,
+            psm=6
+        )
     )
 
     # --------------------------------------------------------
-    # 4. OCR con posiciones
+    # Datos generales
     # --------------------------------------------------------
 
-    datos_ocr = ejecutar_ocr_datos(
-        imagen_preparada
+    documento = (
+        extraer_documento(
+            texto_completo
+        )
     )
 
     # --------------------------------------------------------
-    # 5. Datos generales
+    # PRODUCTOS
+    #
+    # IMPORTANTE:
+    #
+    # Desde versión 2.2 usamos principalmente
+    # el OCR COMPLETO, porque resultó más confiable
+    # que volver a hacer OCR sobre el recorte.
     # --------------------------------------------------------
 
-    documento = extraer_documento(
-        texto_completo
+    detalle = (
+        interpretar_productos_transex(
+            texto_completo
+        )
     )
 
     # --------------------------------------------------------
-    # 6. Detectar zona de productos
+    # TABLA OCR
+    #
+    # Se conserva solamente para auditoría.
+    # NO se utiliza como fuente principal.
     # --------------------------------------------------------
 
-    tabla = detectar_y_recortar_tabla(
-        imagen_preparada,
-        datos_ocr
+    datos_posiciones = (
+        ejecutar_ocr_datos(
+            imagen_preparada,
+            psm=6
+        )
     )
 
-    detalle = []
+    tabla = (
+        recortar_zona_productos(
+            imagen_preparada,
+            datos_posiciones
+        )
+    )
+
     tabla_texto = ""
 
     if tabla is not None:
 
-        tabla_limpia = limpiar_lineas_tabla(
+        tabla = preparar_recorte(
             tabla
         )
 
-        tabla_texto = ejecutar_ocr_texto(
-            tabla_limpia,
-            psm=6
-        )
-
-        datos_tabla = ejecutar_ocr_datos(
-            tabla_limpia,
-            psm=6
-        )
-
-        detalle = interpretar_tabla_transex(
-            datos_tabla,
-            tabla_limpia.width
+        tabla_texto = (
+            ejecutar_ocr_texto(
+                tabla,
+                psm=6
+            )
         )
 
     return {
-        "text": texto_completo,
-        "documento": documento,
-        "detalle": detalle,
-        "tabla_texto": tabla_texto
+
+        "text":
+            texto_completo,
+
+        "documento":
+            documento,
+
+        "detalle":
+            detalle,
+
+        "tabla_texto":
+            tabla_texto
     }
 
 
 # ============================================================
-# PREPARACIÓN DE IMAGEN
+# PREPARAR IMAGEN
 # ============================================================
 
 def preparar_imagen(
     imagen: Image.Image
-) -> Image.Image:
+):
 
-    imagen = imagen.convert("L")
+    imagen = imagen.convert(
+        "L"
+    )
 
     imagen = ImageOps.autocontrast(
         imagen
@@ -307,14 +379,22 @@ def preparar_imagen(
     if ancho < ancho_objetivo:
 
         factor = (
-            ancho_objetivo / ancho
+            ancho_objetivo
+            / ancho
         )
 
         imagen = imagen.resize(
+
             (
-                int(ancho * factor),
-                int(alto * factor)
+                int(
+                    ancho * factor
+                ),
+
+                int(
+                    alto * factor
+                )
             ),
+
             Image.Resampling.LANCZOS
         )
 
@@ -322,38 +402,92 @@ def preparar_imagen(
 
 
 # ============================================================
-# CORRECCIÓN DE PERSPECTIVA
+# PREPARAR RECORTE TABLA
+# ============================================================
+
+def preparar_recorte(
+    imagen: Image.Image
+):
+
+    """
+    No eliminamos líneas.
+
+    En la versión anterior la eliminación
+    de líneas estaba borrando partes de
+    números como 83.778 y 251.334.
+    """
+
+    imagen = imagen.convert(
+        "L"
+    )
+
+    imagen = ImageOps.autocontrast(
+        imagen
+    )
+
+    ancho, alto = imagen.size
+
+    imagen = imagen.resize(
+
+        (
+            int(
+                ancho * 1.5
+            ),
+
+            int(
+                alto * 1.5
+            )
+        ),
+
+        Image.Resampling.LANCZOS
+    )
+
+    return imagen
+
+
+# ============================================================
+# CORRECCIÓN PERSPECTIVA
 # ============================================================
 
 def corregir_perspectiva(
     imagen: Image.Image
-) -> Image.Image:
+):
 
     rgb = np.array(
-        imagen.convert("RGB")
+        imagen.convert(
+            "RGB"
+        )
     )
 
     original = rgb.copy()
 
     alto, ancho = rgb.shape[:2]
 
-    escala = 1200 / max(
-        alto,
-        ancho
+    escala = (
+        1200
+        / max(
+            alto,
+            ancho
+        )
     )
 
     if escala < 1:
 
         pequena = cv2.resize(
+
             rgb,
+
             None,
+
             fx=escala,
+
             fy=escala
         )
 
     else:
 
         pequena = rgb.copy()
+
         escala = 1
 
     gris = cv2.cvtColor(
@@ -380,15 +514,22 @@ def corregir_perspectiva(
     )
 
     contornos, _ = cv2.findContours(
+
         bordes,
+
         cv2.RETR_LIST,
+
         cv2.CHAIN_APPROX_SIMPLE
     )
 
     contornos = sorted(
+
         contornos,
+
         key=cv2.contourArea,
+
         reverse=True
+
     )[:10]
 
     pagina = None
@@ -400,38 +541,55 @@ def corregir_perspectiva(
 
     for contorno in contornos:
 
-        perimetro = cv2.arcLength(
-            contorno,
-            True
+        perimetro = (
+            cv2.arcLength(
+                contorno,
+                True
+            )
         )
 
-        aproximado = cv2.approxPolyDP(
-            contorno,
-            0.02 * perimetro,
-            True
+        aproximado = (
+            cv2.approxPolyDP(
+                contorno,
+                0.02 * perimetro,
+                True
+            )
         )
 
-        if len(aproximado) != 4:
+        if len(
+            aproximado
+        ) != 4:
+
             continue
 
         area = cv2.contourArea(
             aproximado
         )
 
-        if area < area_imagen * 0.45:
+        if (
+            area
+            < area_imagen * 0.45
+        ):
+
             continue
 
         pagina = aproximado.reshape(
             4,
             2
-        ).astype(np.float32)
+        ).astype(
+            np.float32
+        )
 
         break
 
     if pagina is None:
+
         return imagen
 
-    pagina = pagina / escala
+    pagina = (
+        pagina
+        / escala
+    )
 
     ordenados = ordenar_puntos(
         pagina
@@ -439,12 +597,16 @@ def corregir_perspectiva(
 
     tl, tr, br, bl = ordenados
 
-    ancho_superior = np.linalg.norm(
-        tr - tl
+    ancho_superior = (
+        np.linalg.norm(
+            tr - tl
+        )
     )
 
-    ancho_inferior = np.linalg.norm(
-        br - bl
+    ancho_inferior = (
+        np.linalg.norm(
+            br - bl
+        )
     )
 
     ancho_final = int(
@@ -454,49 +616,72 @@ def corregir_perspectiva(
         )
     )
 
-    alto_izq = np.linalg.norm(
-        bl - tl
+    alto_izquierdo = (
+        np.linalg.norm(
+            bl - tl
+        )
     )
 
-    alto_der = np.linalg.norm(
-        br - tr
+    alto_derecho = (
+        np.linalg.norm(
+            br - tr
+        )
     )
 
     alto_final = int(
         max(
-            alto_izq,
-            alto_der
+            alto_izquierdo,
+            alto_derecho
         )
     )
 
     if (
         ancho_final < 500
-        or alto_final < 500
+        or
+        alto_final < 500
     ):
 
         return imagen
 
     destino = np.array(
+
         [
+
             [0, 0],
-            [ancho_final - 1, 0],
+
+            [
+                ancho_final - 1,
+                0
+            ],
+
             [
                 ancho_final - 1,
                 alto_final - 1
             ],
-            [0, alto_final - 1]
+
+            [
+                0,
+                alto_final - 1
+            ]
+
         ],
+
         dtype=np.float32
     )
 
-    matriz = cv2.getPerspectiveTransform(
-        ordenados,
-        destino
+    matriz = (
+        cv2.getPerspectiveTransform(
+            ordenados,
+            destino
+        )
     )
 
     corregida = cv2.warpPerspective(
+
         original,
+
         matriz,
+
         (
             ancho_final,
             alto_final
@@ -508,7 +693,9 @@ def corregir_perspectiva(
     )
 
 
-def ordenar_puntos(puntos):
+def ordenar_puntos(
+    puntos
+):
 
     rect = np.zeros(
         (4, 2),
@@ -520,11 +707,15 @@ def ordenar_puntos(puntos):
     )
 
     rect[0] = puntos[
-        np.argmin(suma)
+        np.argmin(
+            suma
+        )
     ]
 
     rect[2] = puntos[
-        np.argmax(suma)
+        np.argmax(
+            suma
+        )
     ]
 
     diferencia = np.diff(
@@ -533,18 +724,22 @@ def ordenar_puntos(puntos):
     ).flatten()
 
     rect[1] = puntos[
-        np.argmin(diferencia)
+        np.argmin(
+            diferencia
+        )
     ]
 
     rect[3] = puntos[
-        np.argmax(diferencia)
+        np.argmax(
+            diferencia
+        )
     ]
 
     return rect
 
 
 # ============================================================
-# TESSERACT
+# TESSERACT TEXTO
 # ============================================================
 
 def ejecutar_ocr_texto(
@@ -556,14 +751,23 @@ def ejecutar_ocr_texto(
         f"--oem 3 --psm {psm}"
     )
 
-    texto = pytesseract.image_to_string(
-        imagen,
-        lang="spa+eng",
-        config=config
+    texto = (
+        pytesseract.image_to_string(
+
+            imagen,
+
+            lang="spa+eng",
+
+            config=config
+        )
     )
 
     return texto.strip()
 
+
+# ============================================================
+# TESSERACT COORDENADAS
+# ============================================================
 
 def ejecutar_ocr_datos(
     imagen: Image.Image,
@@ -574,11 +778,17 @@ def ejecutar_ocr_datos(
         f"--oem 3 --psm {psm}"
     )
 
-    datos = pytesseract.image_to_data(
-        imagen,
-        lang="spa+eng",
-        config=config,
-        output_type=Output.DICT
+    datos = (
+        pytesseract.image_to_data(
+
+            imagen,
+
+            lang="spa+eng",
+
+            config=config,
+
+            output_type=Output.DICT
+        )
     )
 
     palabras = []
@@ -587,13 +797,16 @@ def ejecutar_ocr_datos(
         datos["text"]
     )
 
-    for i in range(cantidad):
+    for i in range(
+        cantidad
+    ):
 
         texto = str(
             datos["text"][i]
         ).strip()
 
         if not texto:
+
             continue
 
         try:
@@ -610,11 +823,6 @@ def ejecutar_ocr_datos(
 
             "text":
                 texto,
-
-            "normalizado":
-                normalizar_texto(
-                    texto
-                ),
 
             "left":
                 int(
@@ -644,175 +852,86 @@ def ejecutar_ocr_datos(
 
 
 # ============================================================
-# NORMALIZACIÓN
+# DATOS GENERALES
 # ============================================================
 
-def normalizar_texto(texto):
-
-    texto = str(
-        texto or ""
-    ).upper()
-
-    texto = unicodedata.normalize(
-        "NFD",
-        texto
-    )
-
-    texto = "".join(
-        c
-        for c in texto
-        if unicodedata.category(c)
-        != "Mn"
-    )
-
-    texto = re.sub(
-        r"[^A-Z0-9]",
-        "",
-        texto
-    )
-
-    return texto
-
-
-def similar(
-    texto,
-    objetivo,
-    limite=0.70
+def extraer_documento(
+    texto
 ):
-
-    a = normalizar_texto(
-        texto
-    )
-
-    b = normalizar_texto(
-        objetivo
-    )
-
-    if not a or not b:
-        return False
-
-    if a == b:
-        return True
-
-    ratio = SequenceMatcher(
-        None,
-        a,
-        b
-    ).ratio()
-
-    return ratio >= limite
-
-
-# ============================================================
-# DATOS GENERALES DOCUMENTO
-# ============================================================
-
-def extraer_documento(texto):
 
     texto_upper = texto.upper()
 
     documento = {
-        "folio_ocr": None,
-        "obra": None,
-        "patente": None
+
+        "folio_ocr":
+            None,
+
+        "obra":
+            None,
+
+        "patente":
+            None
+
     }
 
     # --------------------------------------------------------
     # FOLIO
     # --------------------------------------------------------
 
-    resultado_folio = re.search(
+    resultado = re.search(
         r"N[°º]?\s*(\d{6,8})",
         texto_upper
     )
 
-    if resultado_folio:
+    if resultado:
 
-        documento["folio_ocr"] = (
-            resultado_folio.group(1)
+        documento[
+            "folio_ocr"
+        ] = resultado.group(
+            1
         )
-
-    else:
-
-        candidatos = re.findall(
-            r"\b\d{6,8}\b",
-            texto_upper
-        )
-
-        frecuencias = {}
-
-        for numero in candidatos:
-
-            frecuencias[numero] = (
-                frecuencias.get(
-                    numero,
-                    0
-                ) + 1
-            )
-
-        if frecuencias:
-
-            ordenados = sorted(
-                frecuencias.items(),
-                key=lambda x: (
-                    x[1],
-                    len(x[0])
-                ),
-                reverse=True
-            )
-
-            documento["folio_ocr"] = (
-                ordenados[0][0]
-            )
 
     # --------------------------------------------------------
     # PATENTE
     # --------------------------------------------------------
 
-    patrones_patente = [
+    resultado = re.search(
 
-        r"PATENTE\s*[:\-]?\s*([A-Z]{2,4}[\-\s]?\d{2,4})",
+        r"PATENTE\s*[:\-]?\s*"
+        r"([A-Z]{2,4}[\-\s]?\d{2,4})",
 
-        r"\b([A-Z]{4}[\-\s]?\d{2})\b"
+        texto_upper
+    )
 
-    ]
+    if resultado:
 
-    for patron in patrones_patente:
-
-        resultado = re.search(
-            patron,
-            texto_upper
-        )
-
-        if resultado:
-
-            patente = resultado.group(
-                1
-            )
-
-            patente = patente.replace(
+        patente = (
+            resultado.group(1)
+            .replace(
                 " ",
                 "-"
             )
+        )
 
-            documento["patente"] = (
-                patente
-            )
-
-            break
+        documento[
+            "patente"
+        ] = patente
 
     # --------------------------------------------------------
     # OBRA
     # --------------------------------------------------------
 
-    resultado_obra = re.search(
-        r"OBRA\s*[:|*]?\s*([A-ZÁÉÍÓÚÑ0-9 \-]{3,40})",
+    resultado = re.search(
+
+        r"OBRA\s*[:|*]?\s*"
+        r"([A-ZÁÉÍÓÚÑ0-9 \-]{3,40})",
+
         texto_upper
     )
 
-    if resultado_obra:
+    if resultado:
 
-        obra = resultado_obra.group(
+        obra = resultado.group(
             1
         )
 
@@ -827,1026 +946,570 @@ def extraer_documento(texto):
             obra
         )
 
-        documento["obra"] = (
-            obra.strip()
-        )
+        documento[
+            "obra"
+        ] = obra.strip()
 
     return documento
 
 
 # ============================================================
-# IDENTIFICAR CÓDIGO PRODUCTO TRANSEX
+# PARSER PRINCIPAL PRODUCTOS TRANSEX
 # ============================================================
 
-def es_codigo_producto_transex(
-    codigo
+def interpretar_productos_transex(
+    texto
 ):
 
-    codigo = str(
-        codigo or ""
-    ).strip().upper()
+    """
+    Busca directamente las líneas de productos
+    dentro del OCR completo.
 
-    codigo = codigo.strip(
-        "|[]{}();:,."
-    )
+    Ejemplo real:
 
-    # --------------------------------------------------------
-    # Código numérico:
-    #
-    # 4489
-    # 12345
-    # etc.
-    # --------------------------------------------------------
+    4489 HORMIGON GR20-90%-40 C/08 D (e DN 3,00 83.778 ET
 
-    if re.fullmatch(
-        r"\d{3,7}",
-        codigo
-    ):
-
-        return True
-
-    # --------------------------------------------------------
-    # Código alfanumérico compuesto:
-    #
-    # CAR-INCOMP
-    # ABC-123
-    # etc.
-    # --------------------------------------------------------
-
-    if re.fullmatch(
-        r"[A-Z0-9]{2,15}-[A-Z0-9\-]{2,20}",
-        codigo
-    ):
-
-        return True
-
-    return False
-
-
-# ============================================================
-# DETECTAR Y RECORTAR TABLA
-# ============================================================
-
-def detectar_y_recortar_tabla(
-    imagen,
-    palabras
-):
-
-    ancho, alto = imagen.size
-
-    # --------------------------------------------------------
-    # Primero buscamos códigos que parezcan productos.
-    # --------------------------------------------------------
-
-    candidatos_productos = []
-
-    for palabra in palabras:
-
-        if not es_codigo_producto_transex(
-            palabra["text"]
-        ):
-
-            continue
-
-        proporcion_y = (
-            palabra["top"]
-            / alto
-        )
-
-        # Los productos de Transex normalmente
-        # están en la zona central.
-        if (
-            0.25
-            <= proporcion_y
-            <= 0.65
-        ):
-
-            candidatos_productos.append(
-                palabra
-            )
-
-    # --------------------------------------------------------
-    # Si detectamos un producto, usamos ese punto.
-    # --------------------------------------------------------
-
-    if candidatos_productos:
-
-        primer_producto = min(
-            candidatos_productos,
-            key=lambda p: p["top"]
-        )
-
-        top_tabla = (
-            primer_producto["top"]
-            - primer_producto["height"] * 2
-        )
-
-        top_tabla = int(
-            max(
-                0,
-                top_tabla
-            )
-        )
-
-    else:
-
-        # ----------------------------------------------------
-        # Buscar OBSERVACIONES
-        # ----------------------------------------------------
-
-        observaciones = []
-
-        for palabra in palabras:
-
-            if similar(
-                palabra["text"],
-                "OBSERVACIONES",
-                0.65
-            ):
-
-                observaciones.append(
-                    palabra
-                )
-
-        if observaciones:
-
-            obs = min(
-                observaciones,
-                key=lambda p: p["top"]
-            )
-
-            top_tabla = int(
-                obs["top"]
-                + obs["height"] * 1.2
-            )
-
-        else:
-
-            top_tabla = int(
-                alto * 0.40
-            )
-
-    # --------------------------------------------------------
-    # Buscar fin tabla: ITEM / SOLICITANTE
-    # --------------------------------------------------------
-
-    candidatos_bottom = []
-
-    for palabra in palabras:
-
-        if (
-            palabra["top"]
-            <= top_tabla
-        ):
-
-            continue
-
-        if (
-            similar(
-                palabra["text"],
-                "ITEM",
-                0.72
-            )
-            or
-            similar(
-                palabra["text"],
-                "SOLICITANTE",
-                0.72
-            )
-        ):
-
-            candidatos_bottom.append(
-                palabra["top"]
-            )
-
-    if candidatos_bottom:
-
-        bottom_tabla = min(
-            candidatos_bottom
-        )
-
-        bottom_tabla = int(
-            bottom_tabla
-            + alto * 0.01
-        )
-
-    else:
-
-        bottom_tabla = int(
-            alto * 0.58
-        )
-
-    if (
-        bottom_tabla
-        <= top_tabla
-    ):
-
-        return None
-
-    tabla = imagen.crop(
-        (
-            0,
-            top_tabla,
-            ancho,
-            min(
-                bottom_tabla,
-                alto
-            )
-        )
-    )
-
-    return tabla
-
-
-# ============================================================
-# LIMPIAR LÍNEAS TABLA
-# ============================================================
-
-def limpiar_lineas_tabla(
-    imagen
-):
-
-    gris = np.array(
-        imagen.convert("L")
-    )
-
-    binaria = cv2.adaptiveThreshold(
-        gris,
-        255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY_INV,
-        31,
-        15
-    )
-
-    horizontal = binaria.copy()
-    vertical = binaria.copy()
-
-    escala_horizontal = max(
-        20,
-        horizontal.shape[1] // 30
-    )
-
-    kernel_horizontal = (
-        cv2.getStructuringElement(
-            cv2.MORPH_RECT,
-            (
-                escala_horizontal,
-                1
-            )
-        )
-    )
-
-    horizontal = cv2.morphologyEx(
-        horizontal,
-        cv2.MORPH_OPEN,
-        kernel_horizontal
-    )
-
-    escala_vertical = max(
-        20,
-        vertical.shape[0] // 8
-    )
-
-    kernel_vertical = (
-        cv2.getStructuringElement(
-            cv2.MORPH_RECT,
-            (
-                1,
-                escala_vertical
-            )
-        )
-    )
-
-    vertical = cv2.morphologyEx(
-        vertical,
-        cv2.MORPH_OPEN,
-        kernel_vertical
-    )
-
-    lineas = cv2.bitwise_or(
-        horizontal,
-        vertical
-    )
-
-    limpia = gris.copy()
-
-    limpia[
-        lineas > 0
-    ] = 255
-
-    pil = Image.fromarray(
-        limpia
-    )
-
-    pil = ImageOps.autocontrast(
-        pil
-    )
-
-    ancho, alto = pil.size
-
-    pil = pil.resize(
-        (
-            int(ancho * 1.5),
-            int(alto * 1.5)
-        ),
-        Image.Resampling.LANCZOS
-    )
-
-    return pil
-
-
-# ============================================================
-# INTERPRETAR TABLA TRANSEX
-# ============================================================
-
-def interpretar_tabla_transex(
-    palabras,
-    ancho
-):
-
-    if not palabras:
-        return []
-
-    alturas = [
-        p["height"]
-        for p in palabras
-        if p["height"] > 0
-    ]
-
-    altura_media = (
-        statistics.median(
-            alturas
-        )
-        if alturas
-        else 20
-    )
-
-    tolerancia_y = max(
-        12,
-        int(
-            altura_media * 0.8
-        )
-    )
-
-    palabras_ordenadas = sorted(
-        palabras,
-        key=lambda p: (
-            p["top"],
-            p["left"]
-        )
-    )
-
-    filas = []
-
-    # --------------------------------------------------------
-    # Agrupar palabras por línea horizontal.
-    # --------------------------------------------------------
-
-    for palabra in palabras_ordenadas:
-
-        centro_y = (
-            palabra["top"]
-            + palabra["height"] / 2
-        )
-
-        agregada = False
-
-        for fila in filas:
-
-            if abs(
-                fila["y"]
-                - centro_y
-            ) <= tolerancia_y:
-
-                fila["palabras"].append(
-                    palabra
-                )
-
-                centros = [
-                    p["top"]
-                    + p["height"] / 2
-                    for p in fila["palabras"]
-                ]
-
-                fila["y"] = (
-                    sum(centros)
-                    / len(centros)
-                )
-
-                agregada = True
-
-                break
-
-        if not agregada:
-
-            filas.append({
-                "y": centro_y,
-                "palabras": [
-                    palabra
-                ]
-            })
-
-    # --------------------------------------------------------
-    # Posiciones aproximadas columnas Transex.
-    # --------------------------------------------------------
-
-    limites = {
-
-        "codigo_fin":
-            0.17,
-
-        "descripcion_fin":
-            0.65,
-
-        "unidad_fin":
-            0.72,
-
-        "cantidad_fin":
-            0.80,
-
-        "precio_fin":
-            0.90
-
-    }
+    CAR-INCOMP CARGA INCOMPLETA DE 7 Sp] MA] 3.00 18.390 a
+    """
 
     resultados = []
 
-    # --------------------------------------------------------
-    # Analizar cada fila.
-    # --------------------------------------------------------
+    lineas = texto.splitlines()
 
-    for fila in filas:
+    for linea_original in lineas:
 
-        palabras_fila = sorted(
-            fila["palabras"],
-            key=lambda p: p["left"]
-        )
-
-        texto_fila = " ".join(
-            p["text"]
-            for p in palabras_fila
+        linea = re.sub(
+            r"\s+",
+            " ",
+            linea_original
         ).strip()
 
-        if not texto_fila:
-            continue
-
-        columnas = {
-
-            "codigo": [],
-            "descripcion": [],
-            "unidad": [],
-            "cantidad": [],
-            "precio": [],
-            "total": []
-
-        }
-
-        # ----------------------------------------------------
-        # Separar según coordenada horizontal.
-        # ----------------------------------------------------
-
-        for palabra in palabras_fila:
-
-            centro_x = (
-                palabra["left"]
-                + palabra["width"] / 2
-            )
-
-            proporcion = (
-                centro_x
-                / ancho
-            )
-
-            if (
-                proporcion
-                < limites["codigo_fin"]
-            ):
-
-                columnas[
-                    "codigo"
-                ].append(
-                    palabra["text"]
-                )
-
-            elif (
-                proporcion
-                < limites[
-                    "descripcion_fin"
-                ]
-            ):
-
-                columnas[
-                    "descripcion"
-                ].append(
-                    palabra["text"]
-                )
-
-            elif (
-                proporcion
-                < limites[
-                    "unidad_fin"
-                ]
-            ):
-
-                columnas[
-                    "unidad"
-                ].append(
-                    palabra["text"]
-                )
-
-            elif (
-                proporcion
-                < limites[
-                    "cantidad_fin"
-                ]
-            ):
-
-                columnas[
-                    "cantidad"
-                ].append(
-                    palabra["text"]
-                )
-
-            elif (
-                proporcion
-                < limites[
-                    "precio_fin"
-                ]
-            ):
-
-                columnas[
-                    "precio"
-                ].append(
-                    palabra["text"]
-                )
-
-            else:
-
-                columnas[
-                    "total"
-                ].append(
-                    palabra["text"]
-                )
-
-        codigo = limpiar_texto_campo(
-            unir_columna(
-                columnas["codigo"]
-            )
-        )
-
-        # ----------------------------------------------------
-        # FILTRO PRINCIPAL
-        #
-        # Aquí desaparecen:
-        #
-        # COMUNA
-        # SS
-        # A
-        #
-        # etc.
-        # ----------------------------------------------------
-
-        if not es_codigo_producto_transex(
-            codigo
-        ):
+        if not linea:
 
             continue
 
-        descripcion = limpiar_texto_campo(
-            unir_columna(
-                columnas["descripcion"]
-            )
-        )
-
-        unidad_ocr = limpiar_texto_campo(
-            unir_columna(
-                columnas["unidad"]
-            )
-        )
-
-        cantidad_raw = limpiar_texto_campo(
-            unir_columna(
-                columnas["cantidad"]
-            )
-        )
-
-        precio_raw = limpiar_texto_campo(
-            unir_columna(
-                columnas["precio"]
-            )
-        )
-
-        total_raw = limpiar_texto_campo(
-            unir_columna(
-                columnas["total"]
-            )
+        linea_upper = (
+            linea.upper()
         )
 
         # ----------------------------------------------------
-        # Limpiar descripción específicamente Transex.
-        # ----------------------------------------------------
-
-        descripcion = (
-            limpiar_descripcion_transex(
-                descripcion
-            )
-        )
-
-        cantidad = convertir_decimal_chileno(
-            cantidad_raw
-        )
-
-        precio = convertir_entero_chileno(
-            precio_raw
-        )
-
-        total_ocr = convertir_entero_chileno(
-            total_raw
-        )
-
-        # ----------------------------------------------------
-        # Una línea de producto debe tener
-        # cantidad y precio.
+        # HORMIGÓN
         # ----------------------------------------------------
 
         if (
-            cantidad is None
-            or precio is None
+            "HORMIGON"
+            in linea_upper
         ):
+
+            item = (
+                interpretar_linea_hormigon(
+                    linea
+                )
+            )
+
+            if item:
+
+                resultados.append(
+                    item
+                )
 
             continue
 
         # ----------------------------------------------------
-        # Evitar cantidades absurdas provenientes del OCR.
-        #
-        # Para hormigón normalmente hablamos de
-        # cantidades bastante menores.
+        # CARGA INCOMPLETA
         # ----------------------------------------------------
 
         if (
-            cantidad <= 0
-            or cantidad > 1000
+            "CARGA"
+            in linea_upper
+            and
+            "INCOMPLETA"
+            in linea_upper
         ):
 
-            continue
-
-        if precio <= 0:
-
-            continue
-
-        # ----------------------------------------------------
-        # Total calculado.
-        # ----------------------------------------------------
-
-        total_calculado = round(
-            cantidad * precio
-        )
-
-        # ----------------------------------------------------
-        # Unidad normalizada.
-        # ----------------------------------------------------
-
-        unidad = normalizar_unidad_transex(
-            unidad_ocr,
-            descripcion
-        )
-
-        # ----------------------------------------------------
-        # Validar total OCR.
-        # ----------------------------------------------------
-
-        total_coincide = None
-
-        if total_ocr is not None:
-
-            total_coincide = (
-                total_ocr
-                == total_calculado
+            item = (
+                interpretar_linea_carga_incompleta(
+                    linea
+                )
             )
 
-        # ----------------------------------------------------
-        # Confianza media Tesseract.
-        # ----------------------------------------------------
+            if item:
 
-        confianzas = [
-            p["conf"]
-            for p in palabras_fila
-            if p["conf"] >= 0
-        ]
-
-        confianza = (
-            round(
-                sum(confianzas)
-                / len(confianzas),
-                1
-            )
-            if confianzas
-            else None
-        )
-
-        resultados.append({
-
-            "codigo":
-                codigo,
-
-            "descripcion":
-                descripcion,
-
-            "unidad":
-                unidad,
-
-            "unidad_ocr":
-                unidad_ocr,
-
-            "cantidad_raw":
-                cantidad_raw,
-
-            "cantidad":
-                cantidad,
-
-            "precio_raw":
-                precio_raw,
-
-            "precio":
-                precio,
-
-            "total_raw":
-                total_raw,
-
-            "total_ocr":
-                total_ocr,
-
-            "total_calculado":
-                total_calculado,
-
-            "total_coincide":
-                total_coincide,
-
-            "confianza_ocr":
-                confianza,
-
-            "fila_raw":
-                texto_fila
-
-        })
+                resultados.append(
+                    item
+                )
 
     return resultados
 
 
 # ============================================================
-# LIMPIAR DESCRIPCIÓN PRODUCTO
+# LÍNEA HORMIGÓN
 # ============================================================
 
-def limpiar_descripcion_transex(
-    descripcion
+def interpretar_linea_hormigon(
+    linea
 ):
 
-    texto = re.sub(
-        r"\s+",
-        " ",
-        str(
-            descripcion or ""
-        )
-    ).strip()
-
-    texto_upper = texto.upper()
-
-    # --------------------------------------------------------
-    # HORMIGÓN
-    #
-    # Si encontramos algo como:
-    #
-    # HORMIGON GR20-90%-40 C/08 e
-    #
-    # cortamos después de C/08.
-    # --------------------------------------------------------
-
-    if "HORMIGON" in texto_upper:
-
-        resultado = re.search(
-            r"(HORMIGON\s+.*?C/\d{1,3})",
-            texto_upper
-        )
-
-        if resultado:
-
-            return resultado.group(
-                1
-            ).strip()
-
-    # --------------------------------------------------------
-    # CARGA INCOMPLETA
-    # --------------------------------------------------------
-
-    if (
-        "CARGA"
-        in texto_upper
-        and
-        "INCOMPLETA"
-        in texto_upper
-    ):
-
-        return "CARGA INCOMPLETA"
-
-    # --------------------------------------------------------
-    # Eliminar ruido de tokens de 1 carácter
-    # al final.
-    # --------------------------------------------------------
-
-    tokens = texto.split()
-
-    while (
-        tokens
-        and
-        len(tokens[-1]) <= 1
-    ):
-
-        tokens.pop()
-
-    return " ".join(
-        tokens
-    ).strip()
-
-
-# ============================================================
-# NORMALIZAR UNIDAD
-# ============================================================
-
-def normalizar_unidad_transex(
-    unidad_ocr,
-    descripcion
-):
-
-    unidad = normalizar_texto(
-        unidad_ocr
+    linea_upper = (
+        linea.upper()
     )
 
-    descripcion_upper = str(
-        descripcion or ""
-    ).upper()
-
     # --------------------------------------------------------
-    # Si Tesseract realmente vio M3.
+    # Código
     # --------------------------------------------------------
 
-    if unidad in {
-        "M3",
-        "M",
-        "M³"
-    }:
+    resultado_codigo = re.match(
+        r"^\s*(\d{3,7})\b",
+        linea_upper
+    )
 
-        return "M3"
+    if not resultado_codigo:
+
+        return None
+
+    codigo = resultado_codigo.group(
+        1
+    )
 
     # --------------------------------------------------------
-    # Para el MVP Transex:
+    # Descripción
     #
-    # Hormigón y Carga Incompleta se expresan
-    # en M3.
+    # Ejemplo:
     #
-    # No estamos diciendo que el OCR lo leyó.
-    # Estamos normalizando por tipo de ítem.
+    # HORMIGON GR20-90%-40 C/08
     # --------------------------------------------------------
+
+    resultado_descripcion = re.search(
+
+        r"(HORMIGON\s+.*?C/\d{1,3})",
+
+        linea_upper
+    )
+
+    if not resultado_descripcion:
+
+        return None
+
+    descripcion = (
+        resultado_descripcion
+        .group(1)
+        .strip()
+    )
+
+    posicion_fin_descripcion = (
+        resultado_descripcion.end()
+    )
+
+    cola = linea[
+        posicion_fin_descripcion:
+    ]
+
+    # --------------------------------------------------------
+    # Cantidad y precio.
+    # --------------------------------------------------------
+
+    valores = (
+        extraer_cantidad_precio_total(
+            cola
+        )
+    )
 
     if (
-        "HORMIGON"
-        in descripcion_upper
+        valores["cantidad"]
+        is None
+        or
+        valores["precio"]
+        is None
     ):
 
-        return "M3"
+        return None
+
+    total_calculado = round(
+        valores["cantidad"]
+        * valores["precio"]
+    )
+
+    total_coincide = None
 
     if (
+        valores["total_ocr"]
+        is not None
+    ):
+
+        total_coincide = (
+            valores["total_ocr"]
+            == total_calculado
+        )
+
+    return {
+
+        "codigo":
+            codigo,
+
+        "descripcion":
+            descripcion,
+
+        "unidad":
+            "M3",
+
+        "unidad_ocr":
+            None,
+
+        "cantidad_raw":
+            valores[
+                "cantidad_raw"
+            ],
+
+        "cantidad":
+            valores[
+                "cantidad"
+            ],
+
+        "precio_raw":
+            valores[
+                "precio_raw"
+            ],
+
+        "precio":
+            valores[
+                "precio"
+            ],
+
+        "total_raw":
+            valores[
+                "total_raw"
+            ],
+
+        "total_ocr":
+            valores[
+                "total_ocr"
+            ],
+
+        "total_calculado":
+            total_calculado,
+
+        "total_coincide":
+            total_coincide,
+
+        "confianza_parser":
+            100,
+
+        "fuente":
+            "TEXTO_OCR",
+
+        "fila_raw":
+            linea
+    }
+
+
+# ============================================================
+# CARGA INCOMPLETA
+# ============================================================
+
+def interpretar_linea_carga_incompleta(
+    linea
+):
+
+    linea_upper = (
+        linea.upper()
+    )
+
+    # --------------------------------------------------------
+    # Canonizamos código.
+    #
+    # OCR puede devolver:
+    #
+    # CAR-INCOMP
+    # CAR-NCOMP
+    # --------------------------------------------------------
+
+    codigo = "CAR-INCOMP"
+
+    resultado_descripcion = re.search(
+
+        r"CARGA\s+INCOMPLETA",
+
+        linea_upper
+    )
+
+    if not resultado_descripcion:
+
+        return None
+
+    descripcion = (
         "CARGA INCOMPLETA"
-        in descripcion_upper
-    ):
-
-        return "M3"
-
-    # --------------------------------------------------------
-    # Si no sabemos, conservar OCR.
-    # --------------------------------------------------------
-
-    return (
-        unidad_ocr
-        if unidad_ocr
-        else None
     )
 
+    posicion_fin_descripcion = (
+        resultado_descripcion.end()
+    )
 
-# ============================================================
-# UTILIDADES
-# ============================================================
+    cola = linea[
+        posicion_fin_descripcion:
+    ]
 
-def unir_columna(valores):
-
-    return " ".join(
-        str(v).strip()
-        for v in valores
-        if str(v).strip()
-    ).strip()
-
-
-def limpiar_texto_campo(texto):
-
-    texto = re.sub(
-        r"\s+",
-        " ",
-        str(
-            texto or ""
+    valores = (
+        extraer_cantidad_precio_total(
+            cola
         )
     )
 
-    return texto.strip(
-        " |[]{}"
+    if (
+        valores["cantidad"]
+        is None
+        or
+        valores["precio"]
+        is None
+    ):
+
+        return None
+
+    total_calculado = round(
+        valores["cantidad"]
+        * valores["precio"]
     )
 
+    total_coincide = None
+
+    if (
+        valores["total_ocr"]
+        is not None
+    ):
+
+        total_coincide = (
+            valores["total_ocr"]
+            == total_calculado
+        )
+
+    return {
+
+        "codigo":
+            codigo,
+
+        "descripcion":
+            descripcion,
+
+        "unidad":
+            "M3",
+
+        "unidad_ocr":
+            None,
+
+        "cantidad_raw":
+            valores[
+                "cantidad_raw"
+            ],
+
+        "cantidad":
+            valores[
+                "cantidad"
+            ],
+
+        "precio_raw":
+            valores[
+                "precio_raw"
+            ],
+
+        "precio":
+            valores[
+                "precio"
+            ],
+
+        "total_raw":
+            valores[
+                "total_raw"
+            ],
+
+        "total_ocr":
+            valores[
+                "total_ocr"
+            ],
+
+        "total_calculado":
+            total_calculado,
+
+        "total_coincide":
+            total_coincide,
+
+        "confianza_parser":
+            100,
+
+        "fuente":
+            "TEXTO_OCR",
+
+        "fila_raw":
+            linea
+    }
+
 
 # ============================================================
-# NÚMERO DECIMAL CHILENO
+# EXTRAER CANTIDAD / PRECIO / TOTAL
 # ============================================================
 
-def convertir_decimal_chileno(
+def extraer_cantidad_precio_total(
     texto
 ):
 
-    if not texto:
+    resultado = {
+
+        "cantidad_raw":
+            None,
+
+        "cantidad":
+            None,
+
+        "precio_raw":
+            None,
+
+        "precio":
+            None,
+
+        "total_raw":
+            None,
+
+        "total_ocr":
+            None
+    }
+
+    # --------------------------------------------------------
+    # Cantidad
+    #
+    # Ej:
+    #
+    # 3,00
+    # 3.00
+    # 10,50
+    # --------------------------------------------------------
+
+    coincidencia_cantidad = re.search(
+
+        r"\b(\d{1,3}[,.]\d{2})\b",
+
+        texto
+    )
+
+    if not coincidencia_cantidad:
+
+        return resultado
+
+    cantidad_raw = (
+        coincidencia_cantidad
+        .group(1)
+    )
+
+    cantidad = (
+        convertir_decimal(
+            cantidad_raw
+        )
+    )
+
+    resultado[
+        "cantidad_raw"
+    ] = cantidad_raw
+
+    resultado[
+        "cantidad"
+    ] = cantidad
+
+    # --------------------------------------------------------
+    # Buscar precio DESPUÉS de cantidad.
+    # --------------------------------------------------------
+
+    despues_cantidad = texto[
+        coincidencia_cantidad.end():
+    ]
+
+    # Precio normalmente:
+    #
+    # 83.778
+    # 18.390
+    # 100.000
+    #
+    coincidencia_precio = re.search(
+
+        r"\b(\d{1,3}(?:\.\d{3})+)\b",
+
+        despues_cantidad
+    )
+
+    if not coincidencia_precio:
+
+        return resultado
+
+    precio_raw = (
+        coincidencia_precio
+        .group(1)
+    )
+
+    precio = convertir_monto(
+        precio_raw
+    )
+
+    resultado[
+        "precio_raw"
+    ] = precio_raw
+
+    resultado[
+        "precio"
+    ] = precio
+
+    # --------------------------------------------------------
+    # Buscar eventual total después del precio.
+    # --------------------------------------------------------
+
+    despues_precio = despues_cantidad[
+        coincidencia_precio.end():
+    ]
+
+    coincidencia_total = re.search(
+
+        r"\b(\d{1,3}(?:[\.\s]\d{3})+)\b",
+
+        despues_precio
+    )
+
+    if coincidencia_total:
+
+        total_raw = (
+            coincidencia_total
+            .group(1)
+        )
+
+        resultado[
+            "total_raw"
+        ] = total_raw
+
+        resultado[
+            "total_ocr"
+        ] = convertir_monto(
+            total_raw
+        )
+
+    return resultado
+
+
+# ============================================================
+# NÚMEROS
+# ============================================================
+
+def convertir_decimal(
+    texto
+):
+
+    if texto is None:
+
         return None
 
     valor = str(
         texto
-    )
+    ).strip()
 
     valor = valor.replace(
-        " ",
-        ""
+        ",",
+        "."
     )
-
-    valor = re.sub(
-        r"[^0-9,.]",
-        "",
-        valor
-    )
-
-    if not valor:
-        return None
 
     try:
-
-        if (
-            ","
-            in valor
-            and
-            "."
-            not in valor
-        ):
-
-            valor = valor.replace(
-                ",",
-                "."
-            )
-
-        elif (
-            "."
-            in valor
-            and
-            ","
-            not in valor
-        ):
-
-            partes = valor.split(
-                "."
-            )
-
-            if (
-                len(partes) == 2
-                and
-                len(partes[1]) <= 2
-            ):
-
-                pass
-
-            else:
-
-                valor = valor.replace(
-                    ".",
-                    ""
-                )
-
-        elif (
-            "."
-            in valor
-            and
-            ","
-            in valor
-        ):
-
-            valor = valor.replace(
-                ".",
-                ""
-            ).replace(
-                ",",
-                "."
-            )
 
         return float(
             valor
@@ -1857,28 +1520,24 @@ def convertir_decimal_chileno(
         return None
 
 
-# ============================================================
-# ENTERO CHILENO
-# ============================================================
-
-def convertir_entero_chileno(
+def convertir_monto(
     texto
 ):
 
-    if not texto:
-        return None
+    if texto is None:
 
-    valor = str(
-        texto
-    )
+        return None
 
     valor = re.sub(
         r"[^0-9]",
         "",
-        valor
+        str(
+            texto
+        )
     )
 
     if not valor:
+
         return None
 
     try:
@@ -1890,3 +1549,155 @@ def convertir_entero_chileno(
     except Exception:
 
         return None
+
+
+# ============================================================
+# RECORTAR ZONA PRODUCTOS PARA AUDITORÍA
+# ============================================================
+
+def recortar_zona_productos(
+    imagen,
+    palabras
+):
+
+    ancho, alto = imagen.size
+
+    posiciones_inicio = []
+
+    posiciones_fin = []
+
+    for palabra in palabras:
+
+        texto = (
+            normalizar_texto(
+                palabra[
+                    "text"
+                ]
+            )
+        )
+
+        # ----------------------------------------------------
+        # Inicio aproximado.
+        # ----------------------------------------------------
+
+        if (
+            texto == "OBSERVACIONES"
+        ):
+
+            posiciones_inicio.append(
+                palabra["top"]
+                + palabra["height"]
+            )
+
+        # ----------------------------------------------------
+        # Fin aproximado.
+        # ----------------------------------------------------
+
+        if (
+            texto == "ITEM"
+            or
+            texto == "SOLICITANTE"
+        ):
+
+            posiciones_fin.append(
+                palabra["top"]
+            )
+
+    if posiciones_inicio:
+
+        top = min(
+            posiciones_inicio
+        )
+
+    else:
+
+        top = int(
+            alto * 0.38
+        )
+
+    candidatos_fin = [
+
+        valor
+
+        for valor in posiciones_fin
+
+        if valor > top
+
+    ]
+
+    if candidatos_fin:
+
+        bottom = min(
+            candidatos_fin
+        )
+
+    else:
+
+        bottom = int(
+            alto * 0.58
+        )
+
+    top = max(
+        0,
+        int(
+            top - alto * 0.01
+        )
+    )
+
+    bottom = min(
+        alto,
+        int(
+            bottom + alto * 0.01
+        )
+    )
+
+    if bottom <= top:
+
+        return None
+
+    return imagen.crop(
+
+        (
+            0,
+            top,
+            ancho,
+            bottom
+        )
+    )
+
+
+# ============================================================
+# NORMALIZAR TEXTO
+# ============================================================
+
+def normalizar_texto(
+    texto
+):
+
+    texto = str(
+        texto or ""
+    ).upper()
+
+    texto = unicodedata.normalize(
+        "NFD",
+        texto
+    )
+
+    texto = "".join(
+
+        caracter
+
+        for caracter in texto
+
+        if unicodedata.category(
+            caracter
+        ) != "Mn"
+    )
+
+    texto = re.sub(
+        r"[^A-Z0-9]",
+        "",
+        texto
+    )
+
+    return texto
