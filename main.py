@@ -1,4 +1,4 @@
-import io
+
 import os
 import re
 import tempfile
@@ -16,12 +16,33 @@ from pytesseract import Output
 
 app = FastAPI()
 
+VERSION = "2.7.1-transex-facturas"
+
 FORMATOS_IMAGEN = {"image/jpeg", "image/jpg", "image/png"}
 FORMATO_PDF = "application/pdf"
 
 @app.get("/ping")
 def ping():
-    return {"status": "ok", "service": "ocr-guias", "version": "2.6-transex-rescate"}
+    return {
+        "status": "ok",
+        "service": "ocr-guias",
+        "version": VERSION,
+        "modulos": ["guias", "facturas"],
+        "endpoints": ["/ocr", "/factura", "/factura/ping"],
+    }
+
+
+@app.get("/factura/ping")
+def factura_ping():
+    return {
+        "status": "ok",
+        "modulo": "facturas",
+        "version": VERSION,
+        "endpoint_proceso": "/factura",
+        "vinculo_guias": "REFERENCIA_DOCUMENTAL",
+        "montos_usados_para_match_guia": False,
+    }
+
 
 @app.post("/ocr")
 async def ocr(file: UploadFile = File(...)):
@@ -40,6 +61,43 @@ async def ocr(file: UploadFile = File(...)):
         else:
             raise HTTPException(status_code=400, detail=f"Formato no soportado: {tipo}")
         resultado.update({"ok": True, "filename": file.filename, "content_type": tipo})
+        return resultado
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=str(error))
+
+
+@app.post("/factura")
+async def factura(file: UploadFile = File(...)):
+    """
+    Procesa facturas PDF estructuradas (iConstruye / Transex).
+
+    La relación factura -> guía NO se determina por precios, cantidades ni montos.
+    Este endpoint solamente extrae las referencias documentales de las guías que
+    aparecen explícitamente en la factura.
+    """
+    try:
+        datos = await file.read()
+        if not datos:
+            raise HTTPException(status_code=400, detail="Archivo vacío")
+
+        tipo = file.content_type or ""
+        nombre = (file.filename or "").lower()
+        if tipo != FORMATO_PDF and not nombre.endswith(".pdf"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"/factura solo admite PDF. Formato recibido: {tipo}",
+            )
+
+        resultado = procesar_factura_pdf(datos)
+        resultado.update(
+            {
+                "ok": True,
+                "filename": file.filename,
+                "content_type": tipo or FORMATO_PDF,
+            }
+        )
         return resultado
     except HTTPException:
         raise
@@ -947,3 +1005,408 @@ def normalizar_texto(texto):
         if unicodedata.category(caracter) != "Mn"
     )
     return re.sub(r"[^A-Z0-9]", "", texto)
+
+
+# =============================================================================
+# FACTURAS ESTRUCTURADAS iCONSTRUYE / TRANSEX
+# Versión agregada en 2.7
+# =============================================================================
+
+def procesar_factura_pdf(datos: bytes):
+    """
+    Extrae una factura estructurada desde PDF.
+
+    Prioridad:
+      1) texto embebido del PDF (sin OCR);
+      2) OCR de respaldo solo si el PDF no contiene texto suficiente.
+
+    IMPORTANTE:
+    - Las guías referenciadas se extraen únicamente de la sección documental
+      "GUÍA DE DESPACHO ELECTRÓNICA".
+    - Los montos de factura nunca se usan para decidir qué guía corresponde.
+    """
+    texto, paginas, fuente_texto = extraer_texto_factura_pdf(datos)
+    if not texto or len(texto.strip()) < 20:
+        raise ValueError("No fue posible obtener texto utilizable desde la factura")
+
+    documento = extraer_documento_factura(texto)
+    guias = extraer_guias_referenciadas_factura(texto)
+    detalle = extraer_detalle_factura(texto)
+
+    id_factura = None
+    if documento.get("rut_emisor") and documento.get("folio_factura"):
+        id_factura = (
+            f"{documento['rut_emisor']}-"
+            f"{documento.get('tipo_dte', 33)}-"
+            f"{documento['folio_factura']}"
+        )
+    documento["id_factura"] = id_factura
+
+    suma_detalle = sum(
+        int(item.get("total_linea") or 0)
+        for item in detalle
+        if item.get("incluir_en_neto", False)
+    )
+    neto = documento.get("neto_factura")
+    total = documento.get("total_factura")
+    iva = documento.get("iva_factura")
+
+    validacion = {
+        "cantidad_guias_referenciadas": len(guias),
+        "cantidad_lineas_producto": sum(
+            1 for item in detalle if item.get("tipo_linea") == "PRODUCTO"
+        ),
+        "suma_detalle_factura": suma_detalle,
+        "detalle_vs_neto_coincide": (
+            suma_detalle == neto if neto is not None and suma_detalle > 0 else None
+        ),
+        "neto_mas_iva_vs_total_coincide": (
+            neto + iva == total
+            if neto is not None and iva is not None and total is not None
+            else None
+        ),
+        "regla_vinculo_guias": "REFERENCIA_DOCUMENTAL",
+        "montos_usados_para_match_guia": False,
+    }
+
+    return {
+        "pages": paginas,
+        "text": texto,
+        "fuente_texto": fuente_texto,
+        "documento": documento,
+        "guias_referenciadas": guias,
+        "detalle": detalle,
+        "validacion": validacion,
+    }
+
+
+def extraer_texto_factura_pdf(datos: bytes):
+    """Extrae texto embebido; usa OCR solamente como respaldo."""
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+        tmp.write(datos)
+        ruta_pdf = tmp.name
+
+    try:
+        pdf = pdfium.PdfDocument(ruta_pdf)
+        total_paginas = len(pdf)
+        textos_embebidos = []
+
+        for numero_pagina in range(total_paginas):
+            pagina = pdf[numero_pagina]
+            try:
+                textpage = pagina.get_textpage()
+                texto = textpage.get_text_range() or ""
+            except Exception:
+                texto = ""
+            textos_embebidos.append(texto.strip())
+
+        texto_directo = "\n\n".join(
+            texto for texto in textos_embebidos if texto
+        ).strip()
+
+        # Los PDF de iConstruye normalmente superan ampliamente este umbral.
+        if len(texto_directo) >= 100:
+            return texto_directo, total_paginas, "PDF_TEXTO"
+
+        # Fallback OCR para un eventual PDF escaneado.
+        textos_ocr = []
+        for numero_pagina in range(total_paginas):
+            pagina = pdf[numero_pagina]
+            bitmap = pagina.render(scale=3)
+            imagen = bitmap.to_pil()
+            imagen = ImageOps.exif_transpose(imagen)
+            preparada = preparar_imagen(imagen)
+            texto_ocr = ejecutar_ocr_texto(preparada, psm=6)
+            textos_ocr.append(
+                f"--- PAGINA {numero_pagina + 1} ---\n{texto_ocr}"
+            )
+
+        return "\n\n".join(textos_ocr).strip(), total_paginas, "OCR_FALLBACK"
+    finally:
+        try:
+            os.remove(ruta_pdf)
+        except Exception:
+            pass
+
+
+def extraer_documento_factura(texto):
+    proveedor = extraer_proveedor_factura(texto)
+    rut_emisor = extraer_rut_emisor_factura(texto)
+    folio = extraer_folio_factura(texto)
+
+    return {
+        "rut_emisor": rut_emisor,
+        "proveedor": proveedor,
+        "tipo_dte": 33 if detectar_factura_electronica(texto) else None,
+        "folio_factura": folio,
+        "fecha_emision": extraer_fecha_factura_etiqueta(
+            texto, r"FECHA\s+EMISI[ÓO]N"
+        ),
+        "rut_receptor": extraer_rut_receptor_factura(texto),
+        "razon_social_receptor": extraer_razon_social_receptor_factura(texto),
+        "forma_pago": extraer_forma_pago_factura(texto),
+        "fecha_vencimiento": extraer_fecha_factura_etiqueta(
+            texto, r"FECHA\s+VENCIMIENTO"
+        ),
+        "orden_compra": extraer_orden_compra_factura(texto),
+        "neto_factura": extraer_monto_factura_etiqueta(
+            texto, r"TOTAL\s+NETO"
+        ),
+        "exento_factura": extraer_monto_factura_etiqueta(
+            texto, r"TOTAL\s+EXENTO"
+        ),
+        "iva_factura": extraer_monto_factura_etiqueta(
+            texto, r"TOTAL\s+I\.?V\.?A\.?\s*\(\s*19\s*%\s*\)"
+        ),
+        "total_factura": extraer_monto_factura_etiqueta(
+            texto, r"MONTO\s+TOTAL"
+        ),
+    }
+
+
+def detectar_factura_electronica(texto):
+    normalizado = quitar_acentos_factura(texto).upper()
+    return "FACTURA ELECTRONICA" in normalizado
+
+
+def extraer_proveedor_factura(texto):
+    lineas = [limpiar_texto(linea) for linea in str(texto or "").splitlines()]
+    for linea in lineas:
+        if not linea:
+            continue
+        superior = quitar_acentos_factura(linea).upper()
+        if "FACTURA" in superior:
+            continue
+        if "R.U.T" in superior or "RUT" == superior:
+            continue
+        # En los PDF de iConstruye/Transex la primera línea corresponde al emisor.
+        return linea
+    return None
+
+
+def extraer_rut_emisor_factura(texto):
+    resultado = re.search(
+        r"R\.?\s*U\.?\s*T\.?\s*:\s*([0-9\.\-Kk]+)",
+        str(texto or ""),
+        re.IGNORECASE,
+    )
+    if resultado:
+        return normalizar_rut(resultado.group(1))
+    return None
+
+
+def extraer_folio_factura(texto):
+    resultado = re.search(
+        r"FACTURA\s+ELECTR[ÓO]NICA\s*(?:\r?\n|\s)*"
+        r"N\s*[°º]?\s*(\d{1,12})",
+        str(texto or ""),
+        re.IGNORECASE,
+    )
+    if not resultado:
+        return None
+    try:
+        return int(resultado.group(1))
+    except Exception:
+        return None
+
+
+def extraer_fecha_factura_etiqueta(texto, etiqueta_regex):
+    resultado = re.search(
+        etiqueta_regex + r"\s*:\s*(\d{2}[-/]\d{2}[-/]\d{4})",
+        str(texto or ""),
+        re.IGNORECASE,
+    )
+    return normalizar_fecha_factura(resultado.group(1)) if resultado else None
+
+
+def normalizar_fecha_factura(valor):
+    if not valor:
+        return None
+    candidato = str(valor).strip().replace("/", "-")
+    try:
+        return datetime.strptime(candidato, "%d-%m-%Y").strftime("%d/%m/%Y")
+    except Exception:
+        return None
+
+
+def extraer_rut_receptor_factura(texto):
+    # Se exige que la línea comience en "Rut :" para no tomar el RUT del emisor.
+    resultado = re.search(
+        r"^\s*RUT\s*:\s*([0-9\.\-Kk]+)",
+        str(texto or ""),
+        re.IGNORECASE | re.MULTILINE,
+    )
+    return normalizar_rut(resultado.group(1)) if resultado else None
+
+
+def extraer_razon_social_receptor_factura(texto):
+    resultado = re.search(
+        r"SEÑOR\s*\(ES\)\s*:\s*(.*?)\s+CIUDAD\s*:",
+        str(texto or ""),
+        re.IGNORECASE,
+    )
+    return limpiar_texto(resultado.group(1)) if resultado else None
+
+
+def extraer_forma_pago_factura(texto):
+    resultado = re.search(
+        r"FORMA\s+DE\s+PAGO\s*:\s*([^\r\n]+)",
+        str(texto or ""),
+        re.IGNORECASE,
+    )
+    return limpiar_texto(resultado.group(1)) if resultado else None
+
+
+def extraer_orden_compra_factura(texto):
+    resultado = re.search(
+        r"ORDEN\s+DE\s+COMPRA\s+([A-Z0-9\-]+)"
+        r"(?:\s+\d{2}[-/]\d{2}[-/]\d{4})?",
+        str(texto or ""),
+        re.IGNORECASE,
+    )
+    return resultado.group(1).strip() if resultado else None
+
+
+def extraer_monto_factura_etiqueta(texto, etiqueta_regex):
+    resultado = re.search(
+        etiqueta_regex + r"\s*:\s*\$?\s*([0-9\.\s]+)",
+        str(texto or ""),
+        re.IGNORECASE,
+    )
+    return convertir_monto_factura(resultado.group(1)) if resultado else None
+
+
+def convertir_monto_factura(valor):
+    if valor is None:
+        return None
+    limpio = re.sub(r"[^0-9]", "", str(valor))
+    if not limpio:
+        return None
+    try:
+        return int(limpio)
+    except Exception:
+        return None
+
+
+def convertir_decimal_factura(valor):
+    if valor is None:
+        return None
+    limpio = str(valor).strip().replace(".", "").replace(",", ".")
+    try:
+        return float(limpio)
+    except Exception:
+        return None
+
+
+def quitar_acentos_factura(texto):
+    normalizado = unicodedata.normalize("NFD", str(texto or ""))
+    return "".join(
+        caracter
+        for caracter in normalizado
+        if unicodedata.category(caracter) != "Mn"
+    )
+
+
+def extraer_guias_referenciadas_factura(texto):
+    """
+    Extrae exclusivamente referencias documentales explícitas a Guías de Despacho.
+    No compara montos, cantidades, descripción ni precio.
+    """
+    texto_lineal = re.sub(r"\s+", " ", str(texto or "")).strip()
+    patron = re.compile(
+        r"GU[IÍ]A\s+DE\s+DESPACHO\s+ELECTR[ÓO]NICA\s+"
+        r"(\d{5,12})\s+(\d{2}[-/]\d{2}[-/]\d{4})",
+        re.IGNORECASE,
+    )
+
+    resultados = []
+    folios_vistos = set()
+    for coincidencia in patron.finditer(texto_lineal):
+        folio = coincidencia.group(1)
+        if folio in folios_vistos:
+            continue
+        folios_vistos.add(folio)
+        resultados.append(
+            {
+                "folio_guia": int(folio),
+                "fecha_guia": normalizar_fecha_factura(coincidencia.group(2)),
+                "tipo_referencia": "GUIA_DESPACHO",
+                "fuente_vinculo": "REFERENCIA_DOCUMENTAL_PDF",
+            }
+        )
+
+    return resultados
+
+
+def extraer_detalle_factura(texto):
+    """
+    Extrae líneas económicas de la propia factura.
+
+    Estas líneas sirven para registrar lo facturado y validar internamente la factura.
+    NO se utilizan para vincular una línea con una guía de despacho.
+    """
+    texto = str(texto or "")
+    patron_producto = re.compile(
+        r"(?P<cantidad>\d{1,3}[,.]\d{4})\s*(?:00\s*)?"
+        r"(?P<codigo>\d{3,12})\s+"
+        r"(?P<descripcion1>[^\r\n]+)\s*[\r\n]+"
+        r"(?P<descripcion2>[^\r\n]+)\s*[\r\n]+"
+        r"\$\s*(?P<precio>[\d\.]+),\d{2}\s+"
+        r"\$\s*(?P<total>[\d\.]+)",
+        re.IGNORECASE,
+    )
+
+    detalle = []
+    numero_linea = 1
+    for coincidencia in patron_producto.finditer(texto):
+        descripcion1 = limpiar_texto(coincidencia.group("descripcion1"))
+        descripcion2 = limpiar_texto(coincidencia.group("descripcion2"))
+        descripcion = descripcion1 or descripcion2
+
+        detalle.append(
+            {
+                "nro_linea": numero_linea,
+                "codigo": coincidencia.group("codigo"),
+                "descripcion": descripcion,
+                "unidad": None,
+                "cantidad": convertir_decimal_factura(
+                    coincidencia.group("cantidad")
+                ),
+                "precio_unitario": convertir_monto_factura(
+                    coincidencia.group("precio")
+                ),
+                "descuento": 0,
+                "total_linea": convertir_monto_factura(
+                    coincidencia.group("total")
+                ),
+                "tipo_linea": "PRODUCTO",
+                "incluir_en_neto": True,
+                "texto_original": limpiar_texto(coincidencia.group(0)),
+            }
+        )
+        numero_linea += 1
+
+    # Línea informativa que suele acompañar la factura de Transex.
+    informativa = re.search(
+        r"GUIAS\s+SEGUN\s+GUIAS\s*:\s*([0-9,\s]+)",
+        quitar_acentos_factura(texto),
+        re.IGNORECASE,
+    )
+    if informativa:
+        detalle.append(
+            {
+                "nro_linea": numero_linea,
+                "codigo": None,
+                "descripcion": "GUIAS SEGUN GUIAS: " + limpiar_texto(informativa.group(1)),
+                "unidad": None,
+                "cantidad": None,
+                "precio_unitario": None,
+                "descuento": 0,
+                "total_linea": 0,
+                "tipo_linea": "INFORMATIVA",
+                "incluir_en_neto": False,
+                "texto_original": limpiar_texto(informativa.group(0)),
+            }
+        )
+
+    return detalle
