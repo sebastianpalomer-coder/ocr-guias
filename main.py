@@ -1,4 +1,5 @@
-
+import io
+from io import BytesIO
 import os
 import re
 import tempfile
@@ -16,7 +17,7 @@ from pytesseract import Output
 
 app = FastAPI()
 
-VERSION = "2.7.1-transex-facturas"
+VERSION = "2.7.2-transex-facturas-iofix"
 
 FORMATOS_IMAGEN = {"image/jpeg", "image/jpg", "image/png"}
 FORMATO_PDF = "application/pdf"
@@ -29,6 +30,7 @@ def ping():
         "version": VERSION,
         "modulos": ["guias", "facturas"],
         "endpoints": ["/ocr", "/factura", "/factura/ping"],
+        "bytesio_ok": True,
     }
 
 
@@ -54,7 +56,7 @@ async def ocr(file: UploadFile = File(...)):
         if tipo == FORMATO_PDF:
             resultado = procesar_pdf(datos)
         elif tipo in FORMATOS_IMAGEN:
-            imagen = Image.open(io.BytesIO(datos))
+            imagen = Image.open(BytesIO(datos))
             imagen = ImageOps.exif_transpose(imagen)
             resultado = procesar_imagen(imagen)
             resultado["pages"] = 1
