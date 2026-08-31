@@ -17,7 +17,7 @@ from pytesseract import Output
 
 app = FastAPI()
 
-VERSION = "2.7.2-transex-facturas-iofix"
+VERSION = "2.7.3-transex-facturas-rutfix"
 
 FORMATOS_IMAGEN = {"image/jpeg", "image/jpg", "image/png"}
 FORMATO_PDF = "application/pdf"
@@ -417,14 +417,62 @@ def validar_fecha(texto):
 
 
 def extraer_rut_emisor(texto):
-    texto_upper = texto.upper()
-    if re.search(r"88[\.\s]*147[\.\s]*[56][0O][0O][\-\s]*2", texto_upper):
+    """
+    Extrae el RUT del emisor de una guía.
+
+    IMPORTANTE:
+    - Las fotografías pueden alterar el orden visual de las columnas.
+    - En guías Transex se ha observado que Tesseract puede separar
+      "88.147." de "600-2" y luego confundir un teléfono (por ejemplo
+      28026120) con un RUT.
+    - Por eso:
+        1) se reconoce explícitamente al proveedor Transex;
+        2) cualquier candidato genérico debe pasar validación de dígito
+           verificador chileno antes de ser aceptado.
+    """
+    texto_upper = str(texto or "").upper()
+    texto_compacto = re.sub(r"\s+", " ", texto_upper)
+    solo_alfanum = re.sub(r"[^A-Z0-9]", "", texto_upper)
+
+    # Proveedor específico del MVP.
+    # El OCR puede leer el encabezado en distinto orden, pero mientras
+    # identifique HORMIGONES + TRANSEX podemos recuperar de forma segura
+    # el RUT canónico del emisor.
+    if "HORMIGONES" in texto_upper and "TRANSEX" in texto_upper:
         return "88147600-2"
+
+    # Lectura directa normal del RUT conocido.
+    if re.search(
+        r"88[\.\s]*147[\.\s]*600[\-\s]*2",
+        texto_upper,
+    ):
+        return "88147600-2"
+
+    # Primero intenta candidatos cercanos a etiquetas RUT.
+    patrones_contexto = [
+        r"R\.?\s*U\.?\s*T\.?\s*[:\-]?\s*([0-9\.\s\-K]{8,20})",
+        r"\bRUT\s*[:\-]?\s*([0-9\.\s\-K]{8,20})",
+    ]
+
+    for patron in patrones_contexto:
+        for coincidencia in re.findall(patron, texto_upper, re.IGNORECASE):
+            candidato = normalizar_rut(coincidencia)
+            if candidato and validar_rut_chileno(candidato):
+                return candidato
+
+    # Fallback genérico: nunca aceptar un número solo por tener forma de RUT.
+    # Debe tener DV válido; esto evita confundir teléfonos con RUT.
     candidatos = re.findall(
         r"\b\d{1,2}[\.\s]?\d{3}[\.\s]?\d{3}[\-\s]?[0-9K]\b",
         texto_upper,
     )
-    return normalizar_rut(candidatos[0]) if candidatos else None
+
+    for candidato_raw in candidatos:
+        candidato = normalizar_rut(candidato_raw)
+        if candidato and validar_rut_chileno(candidato):
+            return candidato
+
+    return None
 
 
 def normalizar_rut(rut):
@@ -432,6 +480,41 @@ def normalizar_rut(rut):
     if len(limpio) < 2:
         return None
     return limpio[:-1] + "-" + limpio[-1]
+
+
+def validar_rut_chileno(rut):
+    """
+    Valida el dígito verificador de un RUT chileno.
+    Retorna True solo si el RUT es matemáticamente válido.
+    """
+    normalizado = normalizar_rut(rut)
+    if not normalizado:
+        return False
+
+    cuerpo, dv = normalizado.split("-")
+
+    if not cuerpo.isdigit() or not cuerpo:
+        return False
+
+    suma = 0
+    multiplicador = 2
+
+    for digito in reversed(cuerpo):
+        suma += int(digito) * multiplicador
+        multiplicador += 1
+        if multiplicador > 7:
+            multiplicador = 2
+
+    resultado = 11 - (suma % 11)
+
+    if resultado == 11:
+        dv_calculado = "0"
+    elif resultado == 10:
+        dv_calculado = "K"
+    else:
+        dv_calculado = str(resultado)
+
+    return dv_calculado == dv.upper()
 
 
 def extraer_neto_documento(texto):
